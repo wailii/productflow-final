@@ -1,14 +1,31 @@
 import { invokeLLM } from "./_core/llm";
+import { ENV } from "./_core/env";
+import fs from "fs";
+import path from "path";
 import {
   appendAgentAction,
+  appendWorkflowArtifact,
   finishAgentRun,
+  getAgentContextAssetsWithUrls,
+  getAgentContextArtifacts,
+  getWorkflowStepsByProjectId,
   startAgentRun,
+  updateAgentRunProgress,
 } from "./db-helpers";
+import type { MessageContent } from "./_core/llm";
+import { getLocalStorageDirectory } from "./storage";
 
 /**
- * AI 工作流引擎
- * 负责执行 9 个步骤的 AI Prompt 并生成结果
+ * AI 工作流引擎（Agent Runtime v2）
+ * 核心能力：
+ * 1) 显式阶段状态机（context -> plan -> draft/review loop -> final）
+ * 2) 评审驱动的迭代闭环（最多 N 轮，达到质量阈值后收敛）
+ * 3) 每轮状态快照持久化，便于后续可观测与恢复
  */
+
+const AGENT_STRATEGY = "agent-v2";
+const AGENT_MAX_ITERATIONS = ENV.agentMaxIterations;
+const AGENT_PASS_SCORE = ENV.agentPassScore;
 
 // 定义每个步骤的 Prompt 模板
 const STEP_PROMPTS = {
@@ -218,12 +235,65 @@ const STEP_PROMPTS = {
   },
 };
 
+type AgentPlan = {
+  objective: string;
+  deliverables: string[];
+  executionPlan: string[];
+  qualityGate: string[];
+  riskWatchlist: string[];
+};
+
+type AgentIssue = {
+  severity: "high" | "medium" | "low";
+  issue: string;
+  fix: string;
+};
+
+type AgentReview = {
+  score: number;
+  verdict: "pass" | "revise" | "block";
+  summary: string;
+  issues: AgentIssue[];
+  missingInformation: string[];
+};
+
+export type ChangeIntentType =
+  | "copy_edit"
+  | "ux_tweak"
+  | "feature_adjustment"
+  | "new_feature"
+  | "scope_change"
+  | "technical_constraint";
+
+export type ChangeImpactAnalysis = {
+  intentType: ChangeIntentType;
+  recommendedStartStep: number;
+  impactedSteps: number[];
+  reason: string;
+  risks: string[];
+  conflicts: string[];
+  actionPlan: string[];
+  summary: string;
+};
+
+type AgentContextAsset = {
+  id: number;
+  assetType: "document" | "image" | "prototype" | "other";
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  storageKey: string;
+  note: string | null;
+  sourceLabel: string | null;
+  url: string | null;
+};
+
 function readChoiceText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
 
   return content
-    .map(part => {
+    .map((part) => {
       if (part && typeof part === "object" && "type" in part) {
         const typed = part as { type?: string; text?: string };
         if (typed.type === "text" && typed.text) return typed.text;
@@ -234,14 +304,22 @@ function readChoiceText(content: unknown): string {
     .join("\n");
 }
 
-async function invokeText(messages: Array<{ role: "system" | "user" | "assistant"; content: string }>) {
-  const response = await invokeLLM({ messages });
-  return readChoiceText(response.choices[0]?.message?.content).trim();
+function clampScore(score: number): number {
+  if (!Number.isFinite(score)) return 0;
+  if (score < 0) return 0;
+  if (score > 100) return 100;
+  return Math.round(score);
+}
+
+function isReviewPassed(review: AgentReview | null): boolean {
+  if (!review) return false;
+  const hasHighIssue = review.issues.some((item) => item.severity === "high");
+  return review.verdict === "pass" && review.score >= AGENT_PASS_SCORE && !hasHighIssue;
 }
 
 function summarizeInput(input: Record<string, any>) {
   const inputText = input.text || input.rawRequirement || JSON.stringify(input);
-  return String(inputText).slice(0, 4000);
+  return String(inputText).slice(0, 5000);
 }
 
 function summarizeConversation(
@@ -249,14 +327,597 @@ function summarizeConversation(
 ) {
   if (!history || history.length === 0) return "无";
   return history
-    .slice(-8)
+    .slice(-10)
     .map((item, idx) => `${idx + 1}. [${item.role}] ${item.content}`)
     .join("\n")
-    .slice(0, 4000);
+    .slice(0, 5000);
+}
+
+function summarizePreviousStepOutputs(
+  steps: Array<{ stepNumber: number; output: Record<string, any> | null | undefined }>,
+  currentStepNumber: number
+): string {
+  const snippets = steps
+    .filter((step) => step.stepNumber < currentStepNumber && step.output)
+    .sort((a, b) => a.stepNumber - b.stepNumber)
+    .map((step) => {
+      const title = getStepName(step.stepNumber);
+      const raw = step.output?.text || JSON.stringify(step.output);
+      const excerpt = String(raw).slice(0, 900);
+      return `Step ${step.stepNumber + 1} ${title}:\n${excerpt}`;
+    });
+
+  if (snippets.length === 0) return "无";
+  return snippets.join("\n\n").slice(0, 7000);
+}
+
+function summarizeAllStepOutputs(
+  steps: Array<{ stepNumber: number; output: Record<string, any> | null | undefined }>
+): string {
+  const snippets = steps
+    .sort((a, b) => a.stepNumber - b.stepNumber)
+    .map((step) => {
+      const title = getStepName(step.stepNumber);
+      const raw = step.output?.text || JSON.stringify(step.output ?? {});
+      const excerpt = String(raw).slice(0, 650);
+      return `Step ${step.stepNumber + 1} ${title}:\n${excerpt}`;
+    });
+
+  if (snippets.length === 0) return "无";
+  return snippets.join("\n\n").slice(0, 9000);
+}
+
+function summarizeArtifactContext(
+  artifacts: Array<{
+    stepNumber: number | null;
+    artifactType: string;
+    title: string;
+    content: string;
+    createdAt: Date;
+  }>
+): string {
+  if (artifacts.length === 0) return "无";
+
+  return artifacts
+    .slice(0, 24)
+    .map((item, index) => {
+      const stepLabel =
+        typeof item.stepNumber === "number" ? `Step ${item.stepNumber + 1}` : "全局";
+      const excerpt = item.content.slice(0, 320);
+      return `${index + 1}. [${item.artifactType}] ${stepLabel} ${item.title}\n${excerpt}`;
+    })
+    .join("\n\n")
+    .slice(0, 7000);
+}
+
+function summarizeModelAssets(assets: AgentContextAsset[]): string {
+  if (assets.length === 0) return "无";
+  return assets
+    .slice(0, 20)
+    .map((asset, index) => {
+      return `${index + 1}. [${asset.assetType}] ${asset.fileName} (${asset.mimeType}, ${asset.fileSize} bytes)${
+        asset.note ? `\n说明: ${asset.note}` : ""
+      }`;
+    })
+    .join("\n")
+    .slice(0, 5000);
+}
+
+function isTextLikeMime(mimeType: string): boolean {
+  const lower = mimeType.toLowerCase();
+  return (
+    lower.startsWith("text/") ||
+    lower.includes("json") ||
+    lower.includes("xml") ||
+    lower.includes("yaml") ||
+    lower.includes("csv")
+  );
+}
+
+function isImageMime(mimeType: string): boolean {
+  return mimeType.toLowerCase().startsWith("image/");
+}
+
+function resolveLocalAssetPath(storageKey: string): string | null {
+  const root = getLocalStorageDirectory();
+  const resolved = path.resolve(root, storageKey);
+  if (!resolved.startsWith(root)) {
+    return null;
+  }
+  return resolved;
+}
+
+function readLocalTextExcerpt(storageKey: string, limit = 4000): string | null {
+  const filePath = resolveLocalAssetPath(storageKey);
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  try {
+    const text = fs.readFileSync(filePath, "utf8");
+    return text.slice(0, limit);
+  } catch {
+    return null;
+  }
+}
+
+function readLocalImageAsDataUrl(storageKey: string, mimeType: string): string | null {
+  const filePath = resolveLocalAssetPath(storageKey);
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  try {
+    const bytes = fs.readFileSync(filePath);
+    return `data:${mimeType};base64,${bytes.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+function buildAssetMessageContext(assets: AgentContextAsset[]): {
+  parts: MessageContent[];
+  textHints: string[];
+} {
+  const parts: MessageContent[] = [];
+  const textHints: string[] = [];
+
+  for (const asset of assets.slice(0, 8)) {
+    const remoteUrl =
+      asset.url && /^https?:\/\//i.test(asset.url) ? asset.url : null;
+
+    if (remoteUrl) {
+      if (isImageMime(asset.mimeType)) {
+        parts.push({
+          type: "image_url",
+          image_url: { url: remoteUrl, detail: "auto" },
+        });
+      } else {
+        parts.push({
+          type: "file_url",
+          file_url: {
+            url: remoteUrl,
+            mime_type: asset.mimeType,
+          },
+        });
+      }
+      continue;
+    }
+
+    if (isImageMime(asset.mimeType) && asset.fileSize <= 3 * 1024 * 1024) {
+      const dataUrl = readLocalImageAsDataUrl(asset.storageKey, asset.mimeType);
+      if (dataUrl) {
+        parts.push({
+          type: "image_url",
+          image_url: { url: dataUrl, detail: "auto" },
+        });
+        continue;
+      }
+    }
+
+    if (isTextLikeMime(asset.mimeType) && asset.fileSize <= 2 * 1024 * 1024) {
+      const excerpt = readLocalTextExcerpt(asset.storageKey, 3000);
+      if (excerpt) {
+        textHints.push(`文件 ${asset.fileName} 摘要:\n${excerpt}`);
+        continue;
+      }
+    }
+
+    textHints.push(
+      `文件 ${asset.fileName} (${asset.mimeType}) 无法直接解析为可读文本，请结合标题和说明审阅。`
+    );
+  }
+
+  return { parts, textHints };
+}
+
+function toPrettyJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function parseJsonObject<T>(text: string): T {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    throw new Error("模型返回为空，无法解析 JSON");
+  }
+
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      const candidate = trimmed.slice(firstBrace, lastBrace + 1);
+      return JSON.parse(candidate) as T;
+    }
+    throw new Error("模型返回不是合法 JSON");
+  }
+}
+
+type AgentMessage = {
+  role: "system" | "user" | "assistant";
+  content: string | MessageContent[];
+};
+
+async function invokeText(
+  messages: AgentMessage[],
+  maxTokens?: number
+) {
+  const response = await invokeLLM({ messages, maxTokens: maxTokens ?? 6000 });
+  return readChoiceText(response.choices[0]?.message?.content).trim();
+}
+
+async function invokeStructured<T>(
+  messages: AgentMessage[],
+  schemaName: string,
+  schema: Record<string, unknown>,
+  maxTokens?: number
+): Promise<T> {
+  try {
+    const response = await invokeLLM({
+      messages,
+      maxTokens: maxTokens ?? 2200,
+      responseFormat: {
+        type: "json_schema",
+        json_schema: {
+          name: schemaName,
+          schema,
+          strict: true,
+        },
+      },
+    });
+
+    const text = readChoiceText(response.choices[0]?.message?.content).trim();
+    return parseJsonObject<T>(text);
+  } catch {
+    // fallback：兼容部分模型对 response_format 能力不完整的情况
+    const fallbackText = await invokeText([
+      ...messages,
+      {
+        role: "user",
+        content: "请仅输出合法 JSON，不要输出 Markdown 或解释。",
+      },
+    ], maxTokens ?? 2200);
+    return parseJsonObject<T>(fallbackText);
+  }
+}
+
+function normalizePlan(raw: AgentPlan): AgentPlan {
+  return {
+    objective: raw.objective || "完成当前步骤并交付可执行结果",
+    deliverables: Array.isArray(raw.deliverables) ? raw.deliverables.slice(0, 8) : [],
+    executionPlan: Array.isArray(raw.executionPlan) ? raw.executionPlan.slice(0, 8) : [],
+    qualityGate: Array.isArray(raw.qualityGate) ? raw.qualityGate.slice(0, 8) : [],
+    riskWatchlist: Array.isArray(raw.riskWatchlist) ? raw.riskWatchlist.slice(0, 8) : [],
+  };
+}
+
+function normalizeReview(raw: AgentReview): AgentReview {
+  const issues = Array.isArray(raw.issues)
+    ? raw.issues
+        .map((item) => ({
+          severity:
+            item?.severity === "high" || item?.severity === "medium" || item?.severity === "low"
+              ? item.severity
+              : "medium",
+          issue: item?.issue ? String(item.issue) : "未提供问题描述",
+          fix: item?.fix ? String(item.fix) : "未提供修改建议",
+        }))
+        .slice(0, 10)
+    : [];
+
+  return {
+    score: clampScore(raw.score),
+    verdict:
+      raw.verdict === "pass" || raw.verdict === "revise" || raw.verdict === "block"
+        ? raw.verdict
+        : "revise",
+    summary: raw.summary ? String(raw.summary) : "未提供审查摘要",
+    issues,
+    missingInformation: Array.isArray(raw.missingInformation)
+      ? raw.missingInformation.map(String).slice(0, 8)
+      : [],
+  };
+}
+
+function normalizeChangeAnalysis(raw: ChangeImpactAnalysis): ChangeImpactAnalysis {
+  const normalizedIntent: ChangeIntentType =
+    raw.intentType === "copy_edit" ||
+    raw.intentType === "ux_tweak" ||
+    raw.intentType === "feature_adjustment" ||
+    raw.intentType === "new_feature" ||
+    raw.intentType === "scope_change" ||
+    raw.intentType === "technical_constraint"
+      ? raw.intentType
+      : "feature_adjustment";
+
+  const recommendedStartStep = Math.max(
+    0,
+    Math.min(8, Number.isFinite(raw.recommendedStartStep) ? Math.round(raw.recommendedStartStep) : 0)
+  );
+
+  const impactedSteps = Array.isArray(raw.impactedSteps)
+    ? Array.from(
+        new Set(
+          raw.impactedSteps
+            .map((step) => Number(step))
+            .filter((step) => Number.isInteger(step) && step >= 0 && step <= 8)
+        )
+      ).sort((a, b) => a - b)
+    : [];
+
+  return {
+    intentType: normalizedIntent,
+    recommendedStartStep,
+    impactedSteps: impactedSteps.length > 0 ? impactedSteps : [recommendedStartStep],
+    reason: raw.reason ? String(raw.reason) : "未提供原因",
+    risks: Array.isArray(raw.risks) ? raw.risks.map(String).slice(0, 12) : [],
+    conflicts: Array.isArray(raw.conflicts) ? raw.conflicts.map(String).slice(0, 12) : [],
+    actionPlan: Array.isArray(raw.actionPlan) ? raw.actionPlan.map(String).slice(0, 12) : [],
+    summary: raw.summary ? String(raw.summary) : "未提供摘要",
+  };
+}
+
+function formatPlan(plan: AgentPlan): string {
+  const lines: string[] = [];
+  lines.push(`目标：${plan.objective}`);
+  lines.push("\n交付物：");
+  for (const item of plan.deliverables) {
+    lines.push(`- ${item}`);
+  }
+  lines.push("\n执行计划：");
+  for (const item of plan.executionPlan) {
+    lines.push(`- ${item}`);
+  }
+  lines.push("\n质量门槛：");
+  for (const item of plan.qualityGate) {
+    lines.push(`- ${item}`);
+  }
+  if (plan.riskWatchlist.length > 0) {
+    lines.push("\n风险观察：");
+    for (const item of plan.riskWatchlist) {
+      lines.push(`- ${item}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatReview(review: AgentReview): string {
+  const lines: string[] = [];
+  lines.push(`评分：${review.score}`);
+  lines.push(`结论：${review.verdict}`);
+  lines.push(`摘要：${review.summary}`);
+
+  lines.push("\n问题清单：");
+  if (review.issues.length === 0) {
+    lines.push("- 无");
+  } else {
+    for (const issue of review.issues) {
+      lines.push(`- [${issue.severity}] ${issue.issue}`);
+      lines.push(`  修复：${issue.fix}`);
+    }
+  }
+
+  lines.push("\n缺失信息：");
+  if (review.missingInformation.length === 0) {
+    lines.push("- 无");
+  } else {
+    for (const missing of review.missingInformation) {
+      lines.push(`- ${missing}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+async function generatePlan(input: {
+  systemPrompt: string;
+  taskPrompt: string;
+  historySummary: string;
+  previousOutputSummary: string;
+  artifactsSummary: string;
+  assetSummary: string;
+  assetTextHints: string[];
+  assetParts: MessageContent[];
+}) {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["objective", "deliverables", "executionPlan", "qualityGate", "riskWatchlist"],
+    properties: {
+      objective: { type: "string" },
+      deliverables: { type: "array", items: { type: "string" } },
+      executionPlan: { type: "array", items: { type: "string" } },
+      qualityGate: { type: "array", items: { type: "string" } },
+      riskWatchlist: { type: "array", items: { type: "string" } },
+    },
+  } as const;
+
+  const result = await invokeStructured<AgentPlan>(
+    [
+      {
+        role: "system",
+        content: `${input.systemPrompt}\n\n你是 Agent 的规划模块。只负责生成执行计划与质量门槛。`,
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: [
+              `任务指令:\n${input.taskPrompt}`,
+              `历史对话:\n${input.historySummary}`,
+              `历史步骤输出摘要:\n${input.previousOutputSummary}`,
+              `历史流程资产摘要:\n${input.artifactsSummary}`,
+              `已上传文件摘要:\n${input.assetSummary}`,
+              input.assetTextHints.length > 0
+                ? `可读文件内容摘录:\n${input.assetTextHints.join("\n\n")}`
+                : "",
+              "请结合上传的文件/图片生成结构化计划。",
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+          },
+          ...input.assetParts,
+        ],
+      },
+    ],
+    "agent_plan",
+    schema,
+    2200
+  );
+
+  return normalizePlan(result);
+}
+
+async function generateDraft(input: {
+  systemPrompt: string;
+  taskPrompt: string;
+  plan: AgentPlan;
+  previousOutputSummary: string;
+  artifactsSummary: string;
+  assetSummary: string;
+  assetTextHints: string[];
+  assetParts: MessageContent[];
+  historySummary: string;
+  iteration: number;
+  lastReview: AgentReview | null;
+}) {
+  const reviewHints = input.lastReview
+    ? `上一轮审查结论:\n${formatReview(input.lastReview)}`
+    : "这是第一轮执行，无上一轮审查结论。";
+
+  return invokeText([
+    {
+      role: "system",
+      content: input.systemPrompt,
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: [
+            `当前是第 ${input.iteration} 轮执行。`,
+            `任务指令:\n${input.taskPrompt}`,
+            `执行计划:\n${formatPlan(input.plan)}`,
+            `历史步骤输出摘要:\n${input.previousOutputSummary}`,
+            `历史流程资产摘要:\n${input.artifactsSummary}`,
+            `已上传文件摘要:\n${input.assetSummary}`,
+            input.assetTextHints.length > 0
+              ? `可读文件内容摘录:\n${input.assetTextHints.join("\n\n")}`
+              : "",
+            `历史对话:\n${input.historySummary}`,
+            reviewHints,
+            "请直接输出当前轮完整结果正文，不要解释你的思考过程。",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
+        ...input.assetParts,
+      ],
+    },
+  ], 6500);
+}
+
+async function reviewDraft(input: {
+  taskPrompt: string;
+  draft: string;
+  plan: AgentPlan;
+}) {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["score", "verdict", "summary", "issues", "missingInformation"],
+    properties: {
+      score: { type: "number" },
+      verdict: { type: "string", enum: ["pass", "revise", "block"] },
+      summary: { type: "string" },
+      missingInformation: { type: "array", items: { type: "string" } },
+      issues: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["severity", "issue", "fix"],
+          properties: {
+            severity: { type: "string", enum: ["high", "medium", "low"] },
+            issue: { type: "string" },
+            fix: { type: "string" },
+          },
+        },
+      },
+    },
+  } as const;
+
+  const result = await invokeStructured<AgentReview>(
+    [
+      {
+        role: "system",
+        content:
+          "你是严苛的质量审查 Agent。你必须根据任务目标和计划检查完整性、准确性、可执行性与一致性。",
+      },
+      {
+        role: "user",
+        content: [
+          `原始任务:\n${input.taskPrompt}`,
+          `执行计划:\n${formatPlan(input.plan)}`,
+          `待审查草稿:\n${input.draft}`,
+          "请给出审查评分与可执行修改建议。",
+        ].join("\n\n"),
+      },
+    ],
+    "agent_review",
+    schema,
+    2200
+  );
+
+  return normalizeReview(result);
+}
+
+async function finalizeOutput(input: {
+  systemPrompt: string;
+  taskPrompt: string;
+  plan: AgentPlan;
+  draft: string;
+  review: AgentReview | null;
+  artifactsSummary: string;
+  assetSummary: string;
+  assetTextHints: string[];
+  assetParts: MessageContent[];
+}) {
+  const reviewBlock = input.review
+    ? `审查结果:\n${formatReview(input.review)}`
+    : "无审查结果。";
+
+  return invokeText([
+    { role: "system", content: input.systemPrompt },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: [
+            `任务指令:\n${input.taskPrompt}`,
+            `执行计划:\n${formatPlan(input.plan)}`,
+            `历史流程资产摘要:\n${input.artifactsSummary}`,
+            `已上传文件摘要:\n${input.assetSummary}`,
+            input.assetTextHints.length > 0
+              ? `可读文件内容摘录:\n${input.assetTextHints.join("\n\n")}`
+              : "",
+            `当前草稿:\n${input.draft}`,
+            reviewBlock,
+            "请输出最终版本，要求结构清晰、内容完整、可直接交付；不要输出过程说明。",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
+        ...input.assetParts,
+      ],
+    },
+  ], 6500);
 }
 
 /**
- * 执行指定步骤的 Agent 生成（Plan -> Draft -> Review -> Final）
+ * 执行指定步骤的 Agent 生成（Agent Runtime v2）
  */
 export async function executeWorkflowStep(
   projectId: number,
@@ -274,10 +935,34 @@ export async function executeWorkflowStep(
   const historySummary = summarizeConversation(conversationHistory);
 
   let runId: number | null = null;
+  let iteration = 0;
+  let plan: AgentPlan | null = null;
+  let lastReview: AgentReview | null = null;
+  let bestScore = 0;
 
   try {
-    const run = await startAgentRun(projectId, stepNumber, "loop-v1");
+    const previousSteps = await getWorkflowStepsByProjectId(projectId);
+    const previousOutputSummary = summarizePreviousStepOutputs(previousSteps, stepNumber);
+    const contextArtifacts = await getAgentContextArtifacts(projectId, stepNumber, 80);
+    const artifactsSummary = summarizeArtifactContext(contextArtifacts);
+    const contextAssets = await getAgentContextAssetsWithUrls(projectId, stepNumber, 18);
+    const assetsSummary = summarizeModelAssets(contextAssets as AgentContextAsset[]);
+    const { parts: assetParts, textHints: assetTextHints } = buildAssetMessageContext(
+      contextAssets as AgentContextAsset[]
+    );
+
+    const run = await startAgentRun(projectId, stepNumber, AGENT_STRATEGY);
     runId = run.id;
+
+    await updateAgentRunProgress({
+      runId,
+      currentStage: "context",
+      currentIteration: 0,
+      stateSnapshot: {
+        stepName: stepConfig.name,
+        hasConversation: (conversationHistory?.length ?? 0) > 0,
+      },
+    });
 
     await appendAgentAction({
       runId,
@@ -285,24 +970,54 @@ export async function executeWorkflowStep(
       stepNumber,
       actionType: "context",
       title: "上下文装载",
-      content: `Step: ${stepNumber + 1} ${stepConfig.name}\n\n输入摘要:\n${inputText}\n\n最近对话:\n${historySummary}`,
+      content: [
+        `Step: ${stepNumber + 1} ${stepConfig.name}`,
+        `输入摘要:\n${inputText}`,
+        `最近对话:\n${historySummary}`,
+        `历史步骤摘要:\n${previousOutputSummary}`,
+        `历史资产摘要:\n${artifactsSummary}`,
+        `上传文件摘要:\n${assetsSummary}`,
+      ].join("\n\n"),
       metadata: {
         conversationCount: conversationHistory?.length ?? 0,
+        artifactCount: contextArtifacts.length,
+        assetCount: contextAssets.length,
       },
     });
 
-    const plannerSystem = `${stepConfig.systemPrompt}
-
-你是一个流程化 Agent 的 Planner 子模块。
-任务：给出本步骤的执行计划，不直接输出最终答案。`;
-
-    const planText = await invokeText([
-      { role: "system", content: plannerSystem },
-      {
-        role: "user",
-        content: `请基于以下信息给出 4-6 条执行计划，每条一句话。\n\n任务指令:\n${userPrompt}\n\n最近对话:\n${historySummary}`,
+    await appendWorkflowArtifact({
+      projectId,
+      stepNumber,
+      runId,
+      artifactType: "step_input",
+      source: "system",
+      visibility: "both",
+      title: `Step ${stepNumber + 1} 输入快照`,
+      content: inputText,
+      payload: {
+        historySummary,
+        previousOutputSummary,
+        artifactsSummary,
+        assetsSummary,
       },
-    ]);
+    });
+
+    await updateAgentRunProgress({
+      runId,
+      currentStage: "plan",
+      currentIteration: 0,
+    });
+
+    plan = await generatePlan({
+      systemPrompt: stepConfig.systemPrompt,
+      taskPrompt: userPrompt,
+      historySummary,
+      previousOutputSummary,
+      artifactsSummary,
+      assetSummary: assetsSummary,
+      assetTextHints,
+      assetParts,
+    });
 
     await appendAgentAction({
       runId,
@@ -310,54 +1025,165 @@ export async function executeWorkflowStep(
       stepNumber,
       actionType: "plan",
       title: "计划阶段",
-      content: planText || "（模型未返回计划）",
+      content: formatPlan(plan),
+      metadata: {
+        planItemCount: plan.executionPlan.length,
+      },
     });
 
-    const draftText = await invokeText([
-      { role: "system", content: stepConfig.systemPrompt },
-      {
-        role: "user",
-        content: `你将执行以下计划，先输出一个完整初稿：\n\n${planText}\n\n任务指令:\n${userPrompt}\n\n最近对话:\n${historySummary}`,
-      },
-    ]);
-
-    await appendAgentAction({
-      runId,
+    await appendWorkflowArtifact({
       projectId,
       stepNumber,
-      actionType: "draft",
-      title: "草稿阶段",
-      content: draftText || "（模型未返回草稿）",
-    });
-
-    const reviewText = await invokeText([
-      {
-        role: "system",
-        content:
-          "你是审稿 Agent。请严格检查内容的完整性、可执行性、逻辑一致性、与输入匹配度。",
-      },
-      {
-        role: "user",
-        content: `请审查这份草稿，并输出两部分：\n1) 问题清单\n2) 修改建议\n\n草稿如下：\n${draftText}\n\n原始任务：\n${userPrompt}`,
-      },
-    ]);
-
-    await appendAgentAction({
       runId,
-      projectId,
-      stepNumber,
-      actionType: "review",
-      title: "审查阶段",
-      content: reviewText || "（模型未返回审查意见）",
+      iteration: 0,
+      artifactType: "plan",
+      source: "agent",
+      visibility: "both",
+      title: `Step ${stepNumber + 1} 执行计划`,
+      content: formatPlan(plan),
+      payload: { plan },
     });
 
-    const finalText = await invokeText([
-      { role: "system", content: stepConfig.systemPrompt },
-      {
-        role: "user",
-        content: `根据草稿和审查意见，输出最终版本。要求：结构清晰、可执行、不要解释过程。\n\n草稿：\n${draftText}\n\n审查意见：\n${reviewText}`,
+    await updateAgentRunProgress({
+      runId,
+      currentStage: "plan",
+      currentIteration: 0,
+      stateSnapshot: {
+        stepName: stepConfig.name,
+        plan,
       },
-    ]);
+    });
+
+    let draftText = "";
+
+    for (let round = 1; round <= AGENT_MAX_ITERATIONS; round += 1) {
+      iteration = round;
+
+      await updateAgentRunProgress({
+        runId,
+        currentStage: "draft",
+        currentIteration: round,
+        stateSnapshot: {
+          stepName: stepConfig.name,
+          round,
+          bestScore,
+          lastVerdict: lastReview?.verdict ?? null,
+        },
+      });
+
+      draftText = await generateDraft({
+        systemPrompt: stepConfig.systemPrompt,
+        taskPrompt: userPrompt,
+        plan,
+        previousOutputSummary,
+        artifactsSummary,
+        assetSummary: assetsSummary,
+        assetTextHints,
+        assetParts,
+        historySummary,
+        iteration: round,
+        lastReview,
+      });
+
+      await appendAgentAction({
+        runId,
+        projectId,
+        stepNumber,
+        actionType: "draft",
+        title: `草稿阶段（第 ${round} 轮）`,
+        content: draftText || "（模型未返回草稿）",
+        metadata: {
+          iteration: round,
+        },
+      });
+
+      await appendWorkflowArtifact({
+        projectId,
+        stepNumber,
+        runId,
+        iteration: round,
+        artifactType: "draft",
+        source: "agent",
+        visibility: "both",
+        title: `Step ${stepNumber + 1} 草稿 · 第 ${round} 轮`,
+        content: draftText || "（模型未返回草稿）",
+      });
+
+      await updateAgentRunProgress({
+        runId,
+        currentStage: "review",
+        currentIteration: round,
+      });
+
+      lastReview = await reviewDraft({
+        taskPrompt: userPrompt,
+        draft: draftText,
+        plan,
+      });
+
+      bestScore = Math.max(bestScore, lastReview.score);
+
+      await appendAgentAction({
+        runId,
+        projectId,
+        stepNumber,
+        actionType: "review",
+        title: `审查阶段（第 ${round} 轮）`,
+        content: formatReview(lastReview),
+        metadata: {
+          iteration: round,
+          score: lastReview.score,
+          verdict: lastReview.verdict,
+          highIssues: lastReview.issues.filter((item) => item.severity === "high").length,
+        },
+      });
+
+      await appendWorkflowArtifact({
+        projectId,
+        stepNumber,
+        runId,
+        iteration: round,
+        artifactType: "review",
+        source: "agent",
+        visibility: "both",
+        title: `Step ${stepNumber + 1} 审查 · 第 ${round} 轮`,
+        content: formatReview(lastReview),
+        payload: {
+          score: lastReview.score,
+          verdict: lastReview.verdict,
+          issues: lastReview.issues,
+          missingInformation: lastReview.missingInformation,
+        },
+      });
+
+      if (isReviewPassed(lastReview)) {
+        break;
+      }
+    }
+
+    await updateAgentRunProgress({
+      runId,
+      currentStage: "final",
+      currentIteration: iteration,
+      stateSnapshot: {
+        stepName: stepConfig.name,
+        bestScore,
+        lastVerdict: lastReview?.verdict ?? null,
+      },
+    });
+
+    const fallbackDraft = "当前轮未生成有效草稿，请根据任务重新执行。";
+    const finalText = await finalizeOutput({
+      systemPrompt: stepConfig.systemPrompt,
+      taskPrompt: userPrompt,
+      plan,
+      draft: draftText || fallbackDraft,
+      review: lastReview,
+      artifactsSummary,
+      assetSummary: assetsSummary,
+      assetTextHints,
+      assetParts,
+    });
 
     await appendAgentAction({
       runId,
@@ -365,21 +1191,74 @@ export async function executeWorkflowStep(
       stepNumber,
       actionType: "final",
       title: "定稿阶段",
-      content: finalText || "（模型未返回定稿）",
+      content: finalText || draftText || "（模型未返回定稿）",
+      metadata: {
+        iterations: iteration,
+        bestScore,
+        passed: isReviewPassed(lastReview),
+      },
+    });
+
+    await appendWorkflowArtifact({
+      projectId,
+      stepNumber,
+      runId,
+      iteration,
+      artifactType: "final",
+      source: "agent",
+      visibility: "both",
+      title: `Step ${stepNumber + 1} 定稿`,
+      content: finalText || draftText || "（模型未返回定稿）",
+      payload: {
+        bestScore,
+        verdict: lastReview?.verdict ?? "revise",
+        passed: isReviewPassed(lastReview),
+      },
     });
 
     const output = {
-      text: finalText || draftText,
+      text: finalText || draftText || fallbackDraft,
       timestamp: new Date().toISOString(),
       agent: {
         runId,
-        strategy: "loop-v1",
+        strategy: AGENT_STRATEGY,
+        iterations: iteration,
+        maxIterations: AGENT_MAX_ITERATIONS,
+        bestScore,
+        passScore: AGENT_PASS_SCORE,
+        verdict: lastReview?.verdict ?? "revise",
+        passed: isReviewPassed(lastReview),
+        missingInformation: lastReview?.missingInformation ?? [],
+      },
+      artifacts: {
+        plan,
+        latestReview: lastReview,
       },
     };
+
+    await appendWorkflowArtifact({
+      projectId,
+      stepNumber,
+      runId,
+      iteration,
+      artifactType: "step_output",
+      source: "system",
+      visibility: "both",
+      title: `Step ${stepNumber + 1} 输出`,
+      content: output.text,
+      payload: output,
+    });
 
     await finishAgentRun({
       runId,
       status: "completed",
+      currentStage: "completed",
+      currentIteration: iteration,
+      stateSnapshot: {
+        stepName: stepConfig.name,
+        bestScore,
+        lastVerdict: lastReview?.verdict ?? null,
+      },
       finalOutput: output,
     });
 
@@ -400,10 +1279,37 @@ export async function executeWorkflowStep(
           actionType: "error",
           title: "执行异常",
           content: message,
+          metadata: {
+            iteration,
+            hasPlan: Boolean(plan),
+            lastReview: lastReview ? toPrettyJson(lastReview) : null,
+          },
+        });
+        await appendWorkflowArtifact({
+          projectId,
+          stepNumber,
+          runId,
+          iteration,
+          artifactType: "snapshot",
+          source: "system",
+          visibility: "both",
+          title: `Step ${stepNumber + 1} 失败快照`,
+          content: message,
+          payload: {
+            hasPlan: Boolean(plan),
+            lastReview,
+            bestScore,
+          },
         });
         await finishAgentRun({
           runId,
           status: "error",
+          currentStage: "error",
+          currentIteration: iteration,
+          stateSnapshot: {
+            hasPlan: Boolean(plan),
+            bestScore,
+          },
           errorMessage: message,
         });
       } catch (traceError) {
@@ -416,6 +1322,106 @@ export async function executeWorkflowStep(
       error: message,
     };
   }
+}
+
+export async function analyzeChangeImpact(params: {
+  projectId: number;
+  projectTitle: string;
+  rawRequirement: string;
+  changeRequest: string;
+  steps: Array<{
+    stepNumber: number;
+    status: "pending" | "processing" | "completed" | "error";
+    output: Record<string, any> | null;
+  }>;
+}): Promise<ChangeImpactAnalysis> {
+  const stepSummary = summarizeAllStepOutputs(
+    params.steps.map((step) => ({
+      stepNumber: step.stepNumber,
+      output: step.output,
+    }))
+  );
+
+  const artifacts = await getAgentContextArtifacts(params.projectId, 8, 80);
+  const artifactsSummary = summarizeArtifactContext(artifacts);
+  const contextAssets = await getAgentContextAssetsWithUrls(params.projectId, 8, 20);
+  const assetsSummary = summarizeModelAssets(contextAssets as AgentContextAsset[]);
+  const { parts: assetParts, textHints: assetTextHints } = buildAssetMessageContext(
+    contextAssets as AgentContextAsset[]
+  );
+
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "intentType",
+      "recommendedStartStep",
+      "impactedSteps",
+      "reason",
+      "risks",
+      "conflicts",
+      "actionPlan",
+      "summary",
+    ],
+    properties: {
+      intentType: {
+        type: "string",
+        enum: [
+          "copy_edit",
+          "ux_tweak",
+          "feature_adjustment",
+          "new_feature",
+          "scope_change",
+          "technical_constraint",
+        ],
+      },
+      recommendedStartStep: { type: "integer" },
+      impactedSteps: { type: "array", items: { type: "integer" } },
+      reason: { type: "string" },
+      risks: { type: "array", items: { type: "string" } },
+      conflicts: { type: "array", items: { type: "string" } },
+      actionPlan: { type: "array", items: { type: "string" } },
+      summary: { type: "string" },
+    },
+  } as const;
+
+  const raw = await invokeStructured<ChangeImpactAnalysis>(
+    [
+      {
+        role: "system",
+        content:
+          "你是产品需求全生命周期变更分析 Agent。目标：判断用户变更请求应从第几步重新开始，给出影响范围、冲突与执行建议。优先复用已有产物，避免不必要的全流程重跑。",
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: [
+              `项目名称: ${params.projectTitle}`,
+              `原始需求:\n${params.rawRequirement}`,
+              `最新步骤产物摘要:\n${stepSummary}`,
+              `历史资产摘要:\n${artifactsSummary}`,
+              `已上传文件摘要:\n${assetsSummary}`,
+              assetTextHints.length > 0
+                ? `可读文件内容摘录:\n${assetTextHints.join("\n\n")}`
+                : "",
+              `本次变更请求:\n${params.changeRequest}`,
+              "请输出结构化变更影响分析。",
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+          },
+          ...assetParts,
+        ],
+      },
+    ],
+    "change_impact_analysis",
+    schema,
+    2200
+  );
+
+  return normalizeChangeAnalysis(raw);
 }
 
 /**

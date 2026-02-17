@@ -1,5 +1,16 @@
 const isProduction = process.env.NODE_ENV === "production";
 
+const parseIntInRange = (
+  value: string | undefined,
+  defaultValue: number,
+  min: number,
+  max: number
+) => {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return Math.min(max, Math.max(min, parsed));
+};
+
 const requireInProduction = (
   key: string,
   value: string | undefined,
@@ -54,6 +65,8 @@ export const ENV = {
   llmApiUrl: process.env.LLM_API_URL ?? process.env.BUILT_IN_FORGE_API_URL ?? "",
   llmApiKey: process.env.LLM_API_KEY ?? process.env.BUILT_IN_FORGE_API_KEY ?? "",
   llmModel: process.env.LLM_MODEL ?? "kimi-k2.5",
+  agentMaxIterations: parseIntInRange(process.env.AGENT_MAX_ITERATIONS, 3, 1, 5),
+  agentPassScore: parseIntInRange(process.env.AGENT_PASS_SCORE, 85, 60, 100),
   enableLocalAuth: process.env.ENABLE_LOCAL_AUTH !== "false",
   enableDevLogin:
     process.env.NODE_ENV === "development" &&

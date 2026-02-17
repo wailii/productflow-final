@@ -1,9 +1,28 @@
 // Preconfigured storage helpers for Manus WebDev templates
-// Uses the Biz-provided storage proxy (Authorization: Bearer <token>)
+// Uses proxy storage when available, otherwise falls back to local storage.
 
-import { ENV } from './_core/env';
+import fs from "fs";
+import path from "path";
+import { ENV } from "./_core/env";
 
 type StorageConfig = { baseUrl: string; apiKey: string };
+
+const LOCAL_UPLOAD_ROOT = path.resolve(process.cwd(), ".webdev", "uploads");
+
+export function getLocalStorageDirectory() {
+  return LOCAL_UPLOAD_ROOT;
+}
+
+function ensureLocalRoot() {
+  fs.mkdirSync(LOCAL_UPLOAD_ROOT, { recursive: true });
+}
+
+function canUseProxyStorage() {
+  if (!ENV.forgeApiUrl || !ENV.forgeApiKey) return false;
+  // moonshot chat endpoint is not a storage proxy endpoint.
+  if (ENV.forgeApiUrl.includes("api.moonshot.cn")) return false;
+  return true;
+}
 
 function getStorageConfig(): StorageConfig {
   const baseUrl = ENV.forgeApiUrl;
@@ -38,6 +57,14 @@ async function buildDownloadUrl(
     method: "GET",
     headers: buildAuthHeaders(apiKey),
   });
+
+  if (!response.ok) {
+    const message = await response.text().catch(() => response.statusText);
+    throw new Error(
+      `Storage get download url failed (${response.status} ${response.statusText}): ${message}`
+    );
+  }
+
   return (await response.json()).url;
 }
 
@@ -47,6 +74,20 @@ function ensureTrailingSlash(value: string): string {
 
 function normalizeKey(relKey: string): string {
   return relKey.replace(/^\/+/, "");
+}
+
+function encodeKeyForPath(key: string): string {
+  return key
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+}
+
+function toBuffer(data: Buffer | Uint8Array | string): Buffer {
+  if (typeof data === "string") {
+    return Buffer.from(data);
+  }
+  return Buffer.from(data);
 }
 
 function toFormData(
@@ -67,10 +108,10 @@ function buildAuthHeaders(apiKey: string): HeadersInit {
   return { Authorization: `Bearer ${apiKey}` };
 }
 
-export async function storagePut(
+async function storagePutProxy(
   relKey: string,
   data: Buffer | Uint8Array | string,
-  contentType = "application/octet-stream"
+  contentType: string
 ): Promise<{ key: string; url: string }> {
   const { baseUrl, apiKey } = getStorageConfig();
   const key = normalizeKey(relKey);
@@ -88,15 +129,76 @@ export async function storagePut(
       `Storage upload failed (${response.status} ${response.statusText}): ${message}`
     );
   }
+
   const url = (await response.json()).url;
   return { key, url };
 }
 
-export async function storageGet(relKey: string): Promise<{ key: string; url: string; }> {
+async function storageGetProxy(relKey: string): Promise<{ key: string; url: string }> {
   const { baseUrl, apiKey } = getStorageConfig();
   const key = normalizeKey(relKey);
   return {
     key,
     url: await buildDownloadUrl(baseUrl, key, apiKey),
   };
+}
+
+async function storagePutLocal(
+  relKey: string,
+  data: Buffer | Uint8Array | string
+): Promise<{ key: string; url: string }> {
+  ensureLocalRoot();
+  const key = normalizeKey(relKey);
+  const filePath = path.join(LOCAL_UPLOAD_ROOT, key);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, toBuffer(data));
+
+  return {
+    key,
+    url: `/__uploads/${encodeKeyForPath(key)}`,
+  };
+}
+
+async function storageGetLocal(relKey: string): Promise<{ key: string; url: string }> {
+  ensureLocalRoot();
+  const key = normalizeKey(relKey);
+  const filePath = path.join(LOCAL_UPLOAD_ROOT, key);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Local storage key not found: ${key}`);
+  }
+
+  return {
+    key,
+    url: `/__uploads/${encodeKeyForPath(key)}`,
+  };
+}
+
+export async function storagePut(
+  relKey: string,
+  data: Buffer | Uint8Array | string,
+  contentType = "application/octet-stream"
+): Promise<{ key: string; url: string }> {
+  if (canUseProxyStorage()) {
+    try {
+      return await storagePutProxy(relKey, data, contentType);
+    } catch (error) {
+      console.warn("[storage] proxy upload failed, fallback to local:", error);
+      return storagePutLocal(relKey, data);
+    }
+  }
+
+  return storagePutLocal(relKey, data);
+}
+
+export async function storageGet(relKey: string): Promise<{ key: string; url: string }> {
+  if (canUseProxyStorage()) {
+    try {
+      return await storageGetProxy(relKey);
+    } catch (error) {
+      console.warn("[storage] proxy get failed, fallback to local:", error);
+      return storageGetLocal(relKey);
+    }
+  }
+
+  return storageGetLocal(relKey);
 }

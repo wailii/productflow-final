@@ -133,6 +133,19 @@ export const agentRuns = mysqlTable(
     stepNumber: int("stepNumber").notNull(),
     strategy: varchar("strategy", { length: 64 }).default("loop-v1").notNull(),
     status: mysqlEnum("status", ["running", "completed", "error"]).default("running").notNull(),
+    currentStage: mysqlEnum("currentStage", [
+      "context",
+      "plan",
+      "draft",
+      "review",
+      "final",
+      "completed",
+      "error",
+    ])
+      .default("context")
+      .notNull(),
+    currentIteration: int("currentIteration").default(0).notNull(),
+    stateSnapshot: json("stateSnapshot").$type<Record<string, any>>(),
     finalOutput: json("finalOutput").$type<Record<string, any>>(),
     errorMessage: text("errorMessage"),
     startedAt: timestamp("startedAt").defaultNow().notNull(),
@@ -188,3 +201,93 @@ export const agentActions = mysqlTable(
 
 export type AgentAction = typeof agentActions.$inferSelect;
 export type InsertAgentAction = typeof agentActions.$inferInsert;
+
+/**
+ * Workflow artifact table - lifecycle assets for each round and change request
+ */
+export const workflowArtifacts = mysqlTable(
+  "workflow_artifacts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    projectId: int("projectId").notNull(),
+    stepNumber: int("stepNumber"),
+    runId: int("runId"),
+    iteration: int("iteration"),
+    artifactType: mysqlEnum("artifactType", [
+      "step_input",
+      "step_output",
+      "plan",
+      "draft",
+      "review",
+      "final",
+      "conversation_note",
+      "change_request",
+      "change_analysis",
+      "snapshot",
+    ]).notNull(),
+    source: mysqlEnum("source", ["user", "agent", "system"]).default("system").notNull(),
+    visibility: mysqlEnum("visibility", ["user", "agent", "both"]).default("both").notNull(),
+    title: varchar("title", { length: 180 }).notNull(),
+    content: text("content").notNull(),
+    payload: json("payload").$type<Record<string, any>>(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (table) => ({
+    projectStepCreatedIdx: index("idx_artifacts_project_step_created").on(
+      table.projectId,
+      table.stepNumber,
+      table.createdAt
+    ),
+    projectTypeCreatedIdx: index("idx_artifacts_project_type_created").on(
+      table.projectId,
+      table.artifactType,
+      table.createdAt
+    ),
+    runIterationIdx: index("idx_artifacts_run_iteration").on(
+      table.runId,
+      table.iteration,
+      table.createdAt
+    ),
+  })
+);
+
+export type WorkflowArtifact = typeof workflowArtifacts.$inferSelect;
+export type InsertWorkflowArtifact = typeof workflowArtifacts.$inferInsert;
+
+/**
+ * Workflow assets table - uploaded files/images used across lifecycle
+ */
+export const workflowAssets = mysqlTable(
+  "workflow_assets",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    projectId: int("projectId").notNull(),
+    stepNumber: int("stepNumber"),
+    assetType: mysqlEnum("assetType", ["document", "image", "prototype", "other"])
+      .default("other")
+      .notNull(),
+    scope: mysqlEnum("scope", ["project", "step"]).default("project").notNull(),
+    fileName: varchar("fileName", { length: 255 }).notNull(),
+    mimeType: varchar("mimeType", { length: 160 }).notNull(),
+    fileSize: int("fileSize").notNull(),
+    storageKey: varchar("storageKey", { length: 500 }).notNull(),
+    sourceLabel: varchar("sourceLabel", { length: 120 }),
+    note: text("note"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (table) => ({
+    projectStepCreatedIdx: index("idx_assets_project_step_created").on(
+      table.projectId,
+      table.stepNumber,
+      table.createdAt
+    ),
+    projectAssetTypeIdx: index("idx_assets_project_type_created").on(
+      table.projectId,
+      table.assetType,
+      table.createdAt
+    ),
+  })
+);
+
+export type WorkflowAsset = typeof workflowAssets.$inferSelect;
+export type InsertWorkflowAsset = typeof workflowAssets.$inferInsert;

@@ -1,4 +1,4 @@
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, gte, inArray, or, lte } from "drizzle-orm";
 import { getDb } from "./db";
 import {
   agentActions,
@@ -9,9 +9,14 @@ import {
   type AgentRun,
   type ConversationMessage,
   type Project,
+  type WorkflowArtifact,
+  type WorkflowAsset,
   type WorkflowStep,
+  workflowArtifacts,
+  workflowAssets,
   workflowSteps,
 } from "../drizzle/schema";
+import { storageGet } from "./storage";
 
 /**
  * 项目相关的数据库操作
@@ -101,6 +106,8 @@ export async function deleteProject(projectId: number, userId: number): Promise<
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
+  await db.delete(workflowAssets).where(eq(workflowAssets.projectId, projectId));
+  await db.delete(workflowArtifacts).where(eq(workflowArtifacts.projectId, projectId));
   await db.delete(agentActions).where(eq(agentActions.projectId, projectId));
   await db.delete(agentRuns).where(eq(agentRuns.projectId, projectId));
   await db.delete(conversationHistory).where(eq(conversationHistory.projectId, projectId));
@@ -226,10 +233,19 @@ export async function clearConversationHistory(projectId: number, stepNumber: nu
 /**
  * Agent tracing related DB operations
  */
+export type AgentStage =
+  | "context"
+  | "plan"
+  | "draft"
+  | "review"
+  | "final"
+  | "completed"
+  | "error";
+
 export async function startAgentRun(
   projectId: number,
   stepNumber: number,
-  strategy: string = "loop-v1"
+  strategy: string = "agent-v2"
 ): Promise<AgentRun> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
@@ -241,6 +257,8 @@ export async function startAgentRun(
       stepNumber,
       strategy,
       status: "running",
+      currentStage: "context",
+      currentIteration: 0,
     })
     .$returningId();
 
@@ -250,6 +268,27 @@ export async function startAgentRun(
     .where(eq(agentRuns.id, inserted.id));
   if (!created) throw new Error("Failed to start agent run");
   return created;
+}
+
+export async function updateAgentRunProgress(data: {
+  runId: number;
+  currentStage: AgentStage;
+  currentIteration?: number;
+  stateSnapshot?: Record<string, any>;
+}): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db
+    .update(agentRuns)
+    .set({
+      currentStage: data.currentStage,
+      ...(typeof data.currentIteration === "number"
+        ? { currentIteration: data.currentIteration }
+        : {}),
+      ...(data.stateSnapshot ? { stateSnapshot: data.stateSnapshot } : {}),
+    })
+    .where(eq(agentRuns.id, data.runId));
 }
 
 export async function appendAgentAction(data: {
@@ -288,6 +327,9 @@ export async function appendAgentAction(data: {
 export async function finishAgentRun(data: {
   runId: number;
   status: "completed" | "error";
+  currentStage: "completed" | "error";
+  currentIteration?: number;
+  stateSnapshot?: Record<string, any>;
   finalOutput?: Record<string, any>;
   errorMessage?: string;
 }): Promise<void> {
@@ -298,6 +340,11 @@ export async function finishAgentRun(data: {
     .update(agentRuns)
     .set({
       status: data.status,
+      currentStage: data.currentStage,
+      ...(typeof data.currentIteration === "number"
+        ? { currentIteration: data.currentIteration }
+        : {}),
+      ...(data.stateSnapshot ? { stateSnapshot: data.stateSnapshot } : {}),
       finalOutput: data.finalOutput,
       errorMessage: data.errorMessage,
       finishedAt: new Date(),
@@ -332,4 +379,303 @@ export async function getAgentActionsByRunId(runId: number): Promise<AgentAction
     .from(agentActions)
     .where(eq(agentActions.runId, runId))
     .orderBy(agentActions.createdAt);
+}
+
+/**
+ * Workflow artifacts related DB operations
+ */
+export type WorkflowArtifactType =
+  | "step_input"
+  | "step_output"
+  | "plan"
+  | "draft"
+  | "review"
+  | "final"
+  | "conversation_note"
+  | "change_request"
+  | "change_analysis"
+  | "snapshot";
+
+export async function appendWorkflowArtifact(data: {
+  projectId: number;
+  stepNumber?: number | null;
+  runId?: number | null;
+  iteration?: number | null;
+  artifactType: WorkflowArtifactType;
+  source?: "user" | "agent" | "system";
+  visibility?: "user" | "agent" | "both";
+  title: string;
+  content: string;
+  payload?: Record<string, any>;
+}): Promise<WorkflowArtifact> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const [inserted] = await db
+    .insert(workflowArtifacts)
+    .values({
+      projectId: data.projectId,
+      ...(typeof data.stepNumber === "number" ? { stepNumber: data.stepNumber } : {}),
+      ...(typeof data.runId === "number" ? { runId: data.runId } : {}),
+      ...(typeof data.iteration === "number" ? { iteration: data.iteration } : {}),
+      artifactType: data.artifactType,
+      source: data.source ?? "system",
+      visibility: data.visibility ?? "both",
+      title: data.title,
+      content: data.content,
+      payload: data.payload,
+    })
+    .$returningId();
+
+  const [created] = await db
+    .select()
+    .from(workflowArtifacts)
+    .where(eq(workflowArtifacts.id, inserted.id));
+
+  if (!created) throw new Error("Failed to append workflow artifact");
+  return created;
+}
+
+export async function getWorkflowArtifacts(params: {
+  projectId: number;
+  stepNumber?: number;
+  artifactTypes?: WorkflowArtifactType[];
+  limit?: number;
+}): Promise<WorkflowArtifact[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  const whereBase =
+    typeof params.stepNumber === "number"
+      ? and(
+          eq(workflowArtifacts.projectId, params.projectId),
+          eq(workflowArtifacts.stepNumber, params.stepNumber)
+        )
+      : eq(workflowArtifacts.projectId, params.projectId);
+
+  if (params.artifactTypes && params.artifactTypes.length > 0) {
+    return db
+      .select()
+      .from(workflowArtifacts)
+      .where(and(whereBase, inArray(workflowArtifacts.artifactType, params.artifactTypes)))
+      .orderBy(desc(workflowArtifacts.createdAt))
+      .limit(params.limit ?? 120);
+  }
+
+  return db
+    .select()
+    .from(workflowArtifacts)
+    .where(whereBase)
+    .orderBy(desc(workflowArtifacts.createdAt))
+    .limit(params.limit ?? 120);
+}
+
+export async function getAgentContextArtifacts(
+  projectId: number,
+  stepNumber: number,
+  limit = 80
+): Promise<WorkflowArtifact[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  return db
+    .select()
+    .from(workflowArtifacts)
+    .where(
+      and(
+        eq(workflowArtifacts.projectId, projectId),
+        inArray(workflowArtifacts.visibility, ["both", "agent"])
+      )
+    )
+    .orderBy(desc(workflowArtifacts.createdAt))
+    .limit(limit)
+    .then((rows) =>
+      rows.filter(
+        (row) =>
+          row.stepNumber == null ||
+          row.stepNumber <= stepNumber ||
+          row.artifactType === "change_request" ||
+          row.artifactType === "change_analysis"
+      )
+    );
+}
+
+export async function resetWorkflowFromStep(
+  projectId: number,
+  startStep: number
+): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.transaction(async (tx) => {
+    const affectedSteps = await tx
+      .select()
+      .from(workflowSteps)
+      .where(
+        and(
+          eq(workflowSteps.projectId, projectId),
+          gte(workflowSteps.stepNumber, startStep)
+        )
+      )
+      .orderBy(workflowSteps.stepNumber);
+
+    for (const step of affectedSteps) {
+      if (step.output || step.input) {
+        await tx.insert(workflowArtifacts).values({
+          projectId,
+          stepNumber: step.stepNumber,
+          artifactType: "snapshot",
+          source: "system",
+          visibility: "both",
+          title: `迭代前快照 · Step ${step.stepNumber + 1}`,
+          content: `status=${step.status}\n\n${JSON.stringify(
+            { input: step.input, output: step.output },
+            null,
+            2
+          )}`,
+          payload: {
+            snapshotAt: new Date().toISOString(),
+            previousStatus: step.status,
+            input: step.input,
+            output: step.output,
+          },
+        });
+      }
+
+      await tx
+        .update(workflowSteps)
+        .set({
+          status: "pending",
+          input: null,
+          output: null,
+          errorMessage: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(workflowSteps.id, step.id));
+    }
+  });
+}
+
+/**
+ * Workflow uploaded assets related DB operations
+ */
+export type WorkflowAssetType = "document" | "image" | "prototype" | "other";
+
+export async function appendWorkflowAsset(data: {
+  projectId: number;
+  stepNumber?: number | null;
+  assetType: WorkflowAssetType;
+  scope?: "project" | "step";
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  storageKey: string;
+  sourceLabel?: string;
+  note?: string;
+}): Promise<WorkflowAsset> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const [inserted] = await db
+    .insert(workflowAssets)
+    .values({
+      projectId: data.projectId,
+      ...(typeof data.stepNumber === "number" ? { stepNumber: data.stepNumber } : {}),
+      assetType: data.assetType,
+      scope: data.scope ?? (typeof data.stepNumber === "number" ? "step" : "project"),
+      fileName: data.fileName,
+      mimeType: data.mimeType,
+      fileSize: data.fileSize,
+      storageKey: data.storageKey,
+      sourceLabel: data.sourceLabel,
+      note: data.note,
+    })
+    .$returningId();
+
+  const [created] = await db
+    .select()
+    .from(workflowAssets)
+    .where(eq(workflowAssets.id, inserted.id));
+  if (!created) throw new Error("Failed to append workflow asset");
+  return created;
+}
+
+export async function getWorkflowAssets(params: {
+  projectId: number;
+  stepNumber?: number;
+  limit?: number;
+}): Promise<WorkflowAsset[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  const whereBase =
+    typeof params.stepNumber === "number"
+      ? and(
+          eq(workflowAssets.projectId, params.projectId),
+          or(
+            eq(workflowAssets.scope, "project"),
+            and(eq(workflowAssets.scope, "step"), eq(workflowAssets.stepNumber, params.stepNumber))
+          )
+        )
+      : eq(workflowAssets.projectId, params.projectId);
+
+  return db
+    .select()
+    .from(workflowAssets)
+    .where(whereBase)
+    .orderBy(desc(workflowAssets.createdAt))
+    .limit(params.limit ?? 120);
+}
+
+export async function getWorkflowAssetsWithUrls(params: {
+  projectId: number;
+  stepNumber?: number;
+  limit?: number;
+}): Promise<Array<WorkflowAsset & { url: string | null }>> {
+  const assets = await getWorkflowAssets(params);
+  return Promise.all(
+    assets.map(async (asset) => {
+      try {
+        const resolved = await storageGet(asset.storageKey);
+        return { ...asset, url: resolved.url };
+      } catch {
+        return { ...asset, url: null };
+      }
+    })
+  );
+}
+
+export async function getAgentContextAssetsWithUrls(
+  projectId: number,
+  stepNumber: number,
+  limit = 20
+): Promise<Array<WorkflowAsset & { url: string | null }>> {
+  const db = await getDb();
+  if (!db) return [];
+
+  const assets = await db
+    .select()
+    .from(workflowAssets)
+    .where(
+      and(
+        eq(workflowAssets.projectId, projectId),
+        or(
+          eq(workflowAssets.scope, "project"),
+          and(eq(workflowAssets.scope, "step"), lte(workflowAssets.stepNumber, stepNumber))
+        )
+      )
+    )
+    .orderBy(desc(workflowAssets.createdAt))
+    .limit(limit);
+
+  return Promise.all(
+    assets.map(async (asset) => {
+      try {
+        const resolved = await storageGet(asset.storageKey);
+        return { ...asset, url: resolved.url };
+      } catch {
+        return { ...asset, url: null };
+      }
+    })
+  );
 }
