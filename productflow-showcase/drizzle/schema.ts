@@ -1,4 +1,4 @@
-import { index, int, json, mysqlEnum, mysqlTable, text, timestamp, uniqueIndex, varchar } from "drizzle-orm/mysql-core";
+import { index, int, json, mysqlEnum, mysqlTable, text, timestamp, tinyint, uniqueIndex, varchar } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
@@ -45,6 +45,33 @@ export const localCredentials = mysqlTable(
 
 export type LocalCredential = typeof localCredentials.$inferSelect;
 export type InsertLocalCredential = typeof localCredentials.$inferInsert;
+
+/**
+ * User AI settings table.
+ * Stores personal OpenAI-compatible provider configuration.
+ */
+export const userAiSettings = mysqlTable(
+  "user_ai_settings",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    providerId: varchar("providerId", { length: 64 }).notNull(),
+    baseUrl: varchar("baseUrl", { length: 500 }).notNull(),
+    model: varchar("model", { length: 180 }).notNull(),
+    apiKeyEncrypted: text("apiKeyEncrypted"),
+    enabled: tinyint("enabled").default(0).notNull(),
+    metadata: json("metadata").$type<Record<string, any>>(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (table) => ({
+    userUniqueIdx: uniqueIndex("uidx_user_ai_settings_user").on(table.userId),
+    providerIdx: index("idx_user_ai_settings_provider").on(table.providerId),
+  })
+);
+
+export type UserAiSetting = typeof userAiSettings.$inferSelect;
+export type InsertUserAiSetting = typeof userAiSettings.$inferInsert;
 
 /**
  * Projects table - stores user's requirement analysis projects

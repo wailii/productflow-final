@@ -1,13 +1,105 @@
 import { COOKIE_NAME } from "@shared/const";
+import { AI_PROVIDER_IDS, AI_PROVIDER_PRESET_MAP, AI_PROVIDER_PRESETS, type AiProviderId } from "@shared/ai-providers";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import * as dbHelpers from "./db-helpers";
-import { analyzeChangeImpact, executeWorkflowStep, getStepName } from "./workflow-engine";
+import { decryptSecret, encryptSecret } from "./_core/secrets";
+import {
+  analyzeChangeImpact,
+  continueWorkflowStepConversation,
+  executeWorkflowStep,
+  getStepName,
+} from "./workflow-engine";
 import { storagePut } from "./storage";
+import { invokeLLM, type LLMRuntimeConfig, type MessageContent } from "./_core/llm";
 
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+const providerIdSchema = z.enum(AI_PROVIDER_IDS);
+const DEFAULT_PROVIDER_ID: AiProviderId = "kimi";
+
+function normalizeProviderBaseUrl(value: string) {
+  return value
+    .trim()
+    .replace(/\/chat\/completions\/?$/i, "")
+    .replace(/\/$/, "");
+}
+
+function readChoiceText(content: string | MessageContent[] | undefined) {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (part.type === "text") return part.text;
+      if (part.type === "image_url") return `[image:${part.image_url.url}]`;
+      if (part.type === "file_url") return `[file:${part.file_url.url}]`;
+      return "";
+    })
+    .join("\n")
+    .trim();
+}
+
+type UserAiConfigPublic = {
+  providerId: AiProviderId;
+  providerLabel: string;
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  hasApiKey: boolean;
+  docsUrl?: string;
+  updatedAt: string | null;
+};
+
+function toUserAiConfigPublic(setting: Awaited<ReturnType<typeof dbHelpers.getUserAiSettingByUserId>>): UserAiConfigPublic {
+  if (!setting) {
+    const preset = AI_PROVIDER_PRESET_MAP[DEFAULT_PROVIDER_ID];
+    return {
+      providerId: preset.id,
+      providerLabel: preset.label,
+      enabled: false,
+      baseUrl: preset.defaultBaseUrl,
+      model: preset.defaultModel,
+      hasApiKey: false,
+      docsUrl: preset.docsUrl,
+      updatedAt: null,
+    };
+  }
+
+  const normalizedProviderId = (AI_PROVIDER_IDS as readonly string[]).includes(setting.providerId)
+    ? (setting.providerId as AiProviderId)
+    : "custom";
+  const preset = AI_PROVIDER_PRESET_MAP[normalizedProviderId];
+
+  return {
+    providerId: normalizedProviderId,
+    providerLabel: preset.label,
+    enabled: setting.enabled === 1,
+    baseUrl: setting.baseUrl || preset.defaultBaseUrl,
+    model: setting.model || preset.defaultModel,
+    hasApiKey: Boolean(setting.apiKeyEncrypted && setting.apiKeyEncrypted.trim().length > 0),
+    docsUrl: preset.docsUrl,
+    updatedAt: setting.updatedAt ? new Date(setting.updatedAt).toISOString() : null,
+  };
+}
+
+async function resolveUserLlmRuntimeConfig(userId: number): Promise<LLMRuntimeConfig | undefined> {
+  const setting = await dbHelpers.getUserAiSettingByUserId(userId);
+  if (!setting || setting.enabled !== 1) return undefined;
+
+  const apiKey = decryptSecret(setting.apiKeyEncrypted);
+  if (!apiKey) return undefined;
+
+  const baseUrl = normalizeProviderBaseUrl(setting.baseUrl);
+  if (!baseUrl || !setting.model) return undefined;
+
+  return {
+    apiUrl: baseUrl,
+    apiKey,
+    model: setting.model.trim(),
+  };
+}
 
 function sanitizeFileName(name: string) {
   return name
@@ -53,6 +145,106 @@ export const appRouter = router({
     }),
   }),
 
+  settings: router({
+    providerPresets: protectedProcedure.query(() => {
+      return AI_PROVIDER_PRESETS;
+    }),
+
+    getAiConfig: protectedProcedure.query(async ({ ctx }) => {
+      const setting = await dbHelpers.getUserAiSettingByUserId(ctx.user.id);
+      return toUserAiConfigPublic(setting);
+    }),
+
+    saveAiConfig: protectedProcedure
+      .input(
+        z.object({
+          providerId: providerIdSchema,
+          enabled: z.boolean().default(true),
+          baseUrl: z.string().min(1).max(500),
+          model: z.string().min(1).max(180),
+          apiKey: z.string().max(2000).optional(),
+          clearApiKey: z.boolean().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const preset = AI_PROVIDER_PRESET_MAP[input.providerId];
+        const existing = await dbHelpers.getUserAiSettingByUserId(ctx.user.id);
+        const nextBaseUrl = normalizeProviderBaseUrl(input.baseUrl || preset.defaultBaseUrl);
+        const nextModel = input.model.trim() || preset.defaultModel;
+
+        const apiKeyInput = input.apiKey?.trim();
+        let apiKeyEncrypted: string | null;
+        if (input.clearApiKey) {
+          apiKeyEncrypted = null;
+        } else if (apiKeyInput && apiKeyInput.length > 0) {
+          apiKeyEncrypted = encryptSecret(apiKeyInput);
+        } else {
+          apiKeyEncrypted = existing?.apiKeyEncrypted ?? null;
+        }
+
+        if (input.enabled && (!apiKeyEncrypted || apiKeyEncrypted.trim().length === 0)) {
+          throw new Error("启用个人配置前，请填写有效的 API Key");
+        }
+
+        await dbHelpers.upsertUserAiSetting({
+          userId: ctx.user.id,
+          providerId: input.providerId,
+          enabled: input.enabled,
+          baseUrl: nextBaseUrl,
+          model: nextModel,
+          apiKeyEncrypted,
+          metadata: {
+            providerLabel: preset.label,
+            category: preset.category,
+          },
+        });
+
+        const latest = await dbHelpers.getUserAiSettingByUserId(ctx.user.id);
+        return toUserAiConfigPublic(latest);
+      }),
+
+    testAiConfig: protectedProcedure
+      .input(
+        z.object({
+          providerId: providerIdSchema,
+          baseUrl: z.string().min(1).max(500),
+          model: z.string().min(1).max(180),
+          apiKey: z.string().max(2000).optional(),
+          useSavedApiKey: z.boolean().default(true),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const existing = await dbHelpers.getUserAiSettingByUserId(ctx.user.id);
+        const savedKey = input.useSavedApiKey ? decryptSecret(existing?.apiKeyEncrypted) : "";
+        const runtimeApiKey = input.apiKey?.trim() || savedKey;
+        if (!runtimeApiKey) {
+          throw new Error("请先填写 API Key，或保存后再测试");
+        }
+
+        const runtimeConfig: LLMRuntimeConfig = {
+          apiKey: runtimeApiKey,
+          apiUrl: normalizeProviderBaseUrl(input.baseUrl),
+          model: input.model.trim(),
+        };
+
+        const response = await invokeLLM({
+          runtimeConfig,
+          maxTokens: 32,
+          messages: [
+            {
+              role: "user",
+              content: "请只回复：连接测试成功",
+            },
+          ],
+        });
+
+        return {
+          ok: true,
+          preview: readChoiceText(response.choices[0]?.message?.content).slice(0, 120),
+        } as const;
+      }),
+  }),
+
   // ProductFlow routers
   projects: router({
     // 获取用户的所有项目
@@ -65,14 +257,19 @@ export const appRouter = router({
       .input(
         z.object({
           title: z.string().min(1).max(255),
-          rawRequirement: z.string().min(1),
+          rawRequirement: z.string().optional().default(""),
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const title = input.title.trim();
+        if (!title) {
+          throw new Error("请填写项目标题");
+        }
+        const rawRequirement = input.rawRequirement.trim();
         const project = await dbHelpers.createProjectWithSteps(
           ctx.user.id,
-          input.title,
-          input.rawRequirement
+          title,
+          rawRequirement
         );
         return project;
       }),
@@ -241,6 +438,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const runtimeConfig = await resolveUserLlmRuntimeConfig(ctx.user.id);
         const project = await dbHelpers.getProjectById(input.projectId, ctx.user.id);
         if (!project) {
           throw new Error("Project not found");
@@ -270,7 +468,7 @@ export const appRouter = router({
             status: step.status,
             output: step.output ?? null,
           })),
-        });
+        }, runtimeConfig);
 
         await dbHelpers.appendWorkflowArtifact({
           projectId: input.projectId,
@@ -401,6 +599,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const runtimeConfig = await resolveUserLlmRuntimeConfig(ctx.user.id);
         // 验证项目所有权
         const project = await dbHelpers.getProjectById(
           input.projectId,
@@ -410,12 +609,23 @@ export const appRouter = router({
           throw new Error("Project not found");
         }
 
+        const normalizedMessage = input.userMessage.trim();
+        if (!normalizedMessage) {
+          throw new Error("请输入内容");
+        }
+
+        let seededRawRequirement = project.rawRequirement;
+        if (input.stepNumber === 0 && !project.rawRequirement.trim()) {
+          seededRawRequirement = normalizedMessage;
+          await dbHelpers.updateProjectRawRequirement(input.projectId, seededRawRequirement);
+        }
+
         // 保存用户消息
         await dbHelpers.addConversationMessage(
           input.projectId,
           input.stepNumber,
           "user",
-          input.userMessage
+          normalizedMessage
         );
 
         // 获取完整对话历史
@@ -437,56 +647,73 @@ export const appRouter = router({
         if (step.output) {
           continueInput = step.output;
         } else if (input.stepNumber === 0) {
-          continueInput = { rawRequirement: project.rawRequirement };
+          continueInput = { rawRequirement: seededRawRequirement };
         } else {
           const prevStep = await dbHelpers.getWorkflowStep(
             input.projectId,
             input.stepNumber - 1
           );
-          continueInput = prevStep?.output ?? { text: project.rawRequirement };
+          continueInput = prevStep?.output ?? { text: seededRawRequirement };
         }
 
         continueInput = {
           ...continueInput,
-          latestUserInstruction: input.userMessage.trim(),
+          latestUserInstruction: normalizedMessage,
         };
 
-        // 重新执行步骤，带上对话历史
-        const result = await executeWorkflowStep(
+        // 快速续聊改写：不重跑完整状态机，避免慢和中间产物噪音
+        const result = await continueWorkflowStepConversation(
           input.projectId,
           input.stepNumber,
           continueInput,
-          history
+          normalizedMessage,
+          history,
+          runtimeConfig
         );
 
         // 保存 AI 回复
-        if (result.output) {
+        if (result.output?.text) {
           await dbHelpers.addConversationMessage(
             input.projectId,
             input.stepNumber,
             "assistant",
             result.output.text || ""
           );
+
           await dbHelpers.appendWorkflowArtifact({
             projectId: input.projectId,
             stepNumber: input.stepNumber,
-            artifactType: "conversation_note",
+            artifactType: "step_output",
             source: "agent",
             visibility: "both",
-            title: `Step ${input.stepNumber + 1} 对话打磨`,
-            content: `${input.userMessage.trim()}\n\n---\n\n${result.output.text || ""}`,
+            title: `Step ${input.stepNumber + 1} 输出`,
+            content: result.output.text || "",
             payload: {
-              userMessage: input.userMessage.trim(),
-              runId: result.output?.agent?.runId,
+              userMessage: normalizedMessage,
+              mode: "chat_refine",
+              output: result.output,
             },
           });
         }
 
+        if (!result.success || !result.output) {
+          throw new Error(result.error || "对话失败");
+        }
+
         // 更新步骤输出
         await dbHelpers.updateWorkflowStep(step.id, {
+          input: step.input ?? continueInput,
           output: result.output,
           status: "completed",
         });
+
+        if (project.status !== "completed") {
+          await dbHelpers.updateProjectStep(
+            input.projectId,
+            Math.max(project.currentStep, input.stepNumber),
+            "in_progress"
+          );
+        }
 
         return result;
       }),
@@ -550,6 +777,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const runtimeConfig = await resolveUserLlmRuntimeConfig(ctx.user.id);
         // 获取项目
         const project = await dbHelpers.getProjectById(
           input.projectId,
@@ -578,6 +806,9 @@ export const appRouter = router({
         let stepInput: Record<string, any>;
         if (input.stepNumber === 0) {
           // 第一步使用原始需求
+          if (!project.rawRequirement.trim()) {
+            throw new Error("请先在对话框输入原始需求");
+          }
           stepInput = { rawRequirement: project.rawRequirement };
         } else {
           // 后续步骤使用前一步的输出
@@ -594,7 +825,13 @@ export const appRouter = router({
         }
 
         // 执行 AI 生成
-        const result = await executeWorkflowStep(input.projectId, input.stepNumber, stepInput);
+        const result = await executeWorkflowStep(
+          input.projectId,
+          input.stepNumber,
+          stepInput,
+          undefined,
+          runtimeConfig
+        );
 
         if (result.success && result.output) {
           // 更新步骤状态为 completed

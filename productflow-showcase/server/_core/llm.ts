@@ -66,6 +66,8 @@ export type InvokeParams = {
   output_schema?: OutputSchema;
   responseFormat?: ResponseFormat;
   response_format?: ResponseFormat;
+  runtimeConfig?: LLMRuntimeConfig;
+  runtime_config?: LLMRuntimeConfig;
 };
 
 export type ToolCall = {
@@ -109,6 +111,13 @@ export type ResponseFormat =
   | { type: "text" }
   | { type: "json_object" }
   | { type: "json_schema"; json_schema: JsonSchema };
+
+export type LLMRuntimeConfig = {
+  apiUrl?: string;
+  apiKey?: string;
+  model?: string;
+  extraHeaders?: Record<string, string>;
+};
 
 const ensureArray = (
   value: MessageContent | MessageContent[]
@@ -209,12 +218,13 @@ const normalizeToolChoice = (
   return toolChoice;
 };
 
-const resolveApiUrl = () => {
-  if (!ENV.llmApiUrl || ENV.llmApiUrl.trim().length === 0) {
+const resolveApiUrl = (runtimeApiUrl?: string) => {
+  const raw = runtimeApiUrl ?? ENV.llmApiUrl;
+  if (!raw || raw.trim().length === 0) {
     return "https://api.moonshot.cn/v1/chat/completions";
   }
 
-  const normalized = ENV.llmApiUrl.replace(/\/$/, "");
+  const normalized = raw.replace(/\/$/, "");
   if (normalized.endsWith("/chat/completions")) {
     return normalized;
   }
@@ -222,8 +232,9 @@ const resolveApiUrl = () => {
   return `${normalized}/chat/completions`;
 };
 
-const assertApiKey = () => {
-  if (!ENV.llmApiKey) {
+const assertApiKey = (runtimeApiKey?: string) => {
+  const key = runtimeApiKey ?? ENV.llmApiKey;
+  if (!key) {
     throw new Error("LLM_API_KEY is not configured");
   }
 };
@@ -274,8 +285,6 @@ const normalizeResponseFormat = ({
 };
 
 export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
-  assertApiKey();
-
   const {
     messages,
     tools,
@@ -287,10 +296,16 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     output_schema,
     responseFormat,
     response_format,
+    runtimeConfig,
+    runtime_config,
   } = params;
+  const runtime = runtimeConfig || runtime_config;
+  const resolvedApiKey = runtime?.apiKey ?? ENV.llmApiKey;
+  const resolvedModel = runtime?.model ?? ENV.llmModel;
+  assertApiKey(resolvedApiKey);
 
   const payload: Record<string, unknown> = {
-    model: ENV.llmModel,
+    model: resolvedModel,
     messages: messages.map(normalizeMessage),
   };
 
@@ -319,11 +334,12 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     payload.response_format = normalizedResponseFormat;
   }
 
-  const response = await fetch(resolveApiUrl(), {
+  const response = await fetch(resolveApiUrl(runtime?.apiUrl), {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${ENV.llmApiKey}`,
+      authorization: `Bearer ${resolvedApiKey}`,
+      ...(runtime?.extraHeaders ?? {}),
     },
     body: JSON.stringify(payload),
   });

@@ -1,33 +1,30 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useParams } from "wouter";
-import { motion } from "framer-motion";
-import { Streamdown } from "streamdown";
-import { toast } from "sonner";
+import { trpc } from "@/lib/trpc";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   ArrowLeft,
-  Bot,
-  Check,
-  ChevronRight,
-  CircleDot,
-  Database,
-  FileText,
-  GitBranch,
+  LayoutPanelTop,
   Loader2,
-  MessageSquare,
-  Play,
-  RefreshCw,
+  Paperclip,
   Send,
-  SkipForward,
-  Sparkles,
-  WandSparkles,
+  Settings2,
 } from "lucide-react";
-import { trpc } from "@/lib/trpc";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { Textarea } from "@/components/ui/textarea";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  type ChangeEventHandler,
+  type KeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Streamdown } from "streamdown";
+import { toast } from "sonner";
+import { useLocation, useParams } from "wouter";
 
 const STEP_META = [
   { title: "需求预处理与澄清", phase: "需求定向" },
@@ -39,32 +36,12 @@ const STEP_META = [
   { title: "需求确认与调整", phase: "交付沉淀" },
   { title: "功能性需求文档", phase: "交付沉淀" },
   { title: "补充章节生成", phase: "交付沉淀" },
-];
+] as const;
 
-const PHASES = [
-  { name: "需求定向", stepNumbers: [0, 1, 2] },
-  { name: "方案设计", stepNumbers: [3, 4, 5] },
-  { name: "交付沉淀", stepNumbers: [6, 7, 8] },
-];
-
-const CHAT_QUICK_PROMPTS = [
-  "请列出当前输出里最重要的3个风险点，并给出修复方案。",
-  "请把当前结果改成可直接评审的 checklist 格式。",
-  "请指出和前序步骤可能冲突的地方，并给出合并建议。",
-];
-
-type PanelTab = "output" | "chat" | "artifacts" | "trace";
-
-type ChangeAnalysis = {
-  intentType: string;
-  recommendedStartStep: number;
-  impactedSteps: number[];
-  reason: string;
-  risks: string[];
-  conflicts: string[];
-  actionPlan: string[];
-  summary: string;
-};
+const USER_VISIBLE_ARTIFACT_TYPES = new Set([
+  "step_output",
+  "final",
+]);
 
 function formatDate(value: string | Date | null | undefined) {
   if (!value) return "";
@@ -94,229 +71,835 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+function normalizeMarkdownContent(content: string) {
+  const text = String(content ?? "").replace(/\r\n?/g, "\n").trim();
+  if (!text) return "";
+
+  if (text.startsWith("\"") && text.endsWith("\"")) {
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed === "string") {
+        return parsed.replace(/\r\n?/g, "\n");
+      }
+    } catch {
+      // noop: keep raw text
+    }
+  }
+
+  const escapedNewlineCount = (text.match(/\\n/g) ?? []).length;
+  const realNewlineCount = (text.match(/\n/g) ?? []).length;
+  if (realNewlineCount === 0 && escapedNewlineCount >= 2) {
+    return text
+      .replace(/\\r\\n/g, "\n")
+      .replace(/\\n/g, "\n")
+      .replace(/\\"/g, "\"");
+  }
+
+  return text;
+}
+
+function isImageMime(mimeType?: string | null) {
+  return Boolean(mimeType && mimeType.toLowerCase().startsWith("image/"));
+}
+
+function isPdfMime(mimeType?: string | null) {
+  return Boolean(mimeType && mimeType.toLowerCase().includes("pdf"));
+}
+
+type PreviewTarget =
+  | { kind: "artifact"; id: number }
+  | { kind: "upload"; id: number }
+  | null;
+
+type QuestionnaireInputType = "text" | "single" | "multi";
+
+type QuestionnaireOption = {
+  id: string;
+  label: string;
+  isOther: boolean;
+};
+
+type QuestionnaireField = {
+  id: string;
+  prompt: string;
+  hint: string;
+  inputType: QuestionnaireInputType;
+  options: QuestionnaireOption[];
+};
+
+type ParsedQuestionnaire = {
+  key: string;
+  title: string;
+  questions: QuestionnaireField[];
+};
+
+type QuestionnaireAnswer = {
+  text: string;
+  selectedOptionIds: string[];
+  note: string;
+};
+
+type ParsedOption = {
+  label: string;
+  kind: "checkbox" | "alpha" | "bullet";
+};
+
+type QuestionnaireBlock = {
+  heading: string;
+  lines: string[];
+};
+
+function createEmptyQuestionnaireAnswer(): QuestionnaireAnswer {
+  return {
+    text: "",
+    selectedOptionIds: [],
+    note: "",
+  };
+}
+
+function hasQuestionnaireAnswer(answer?: QuestionnaireAnswer | null) {
+  if (!answer) return false;
+  return (
+    answer.selectedOptionIds.length > 0
+    || answer.text.trim().length > 0
+    || answer.note.trim().length > 0
+  );
+}
+
+function stripMarkdown(value: string) {
+  return value
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/_([^_]+)_/g, "$1")
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^\>\s?/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseOptionLine(value: string): ParsedOption | null {
+  const line = value.trim();
+  if (!line) return null;
+
+  const checkboxMatch = line.match(/^(?:[-*+•]\s*)?[□☐▢]\s*(.+)$/);
+  if (checkboxMatch?.[1]) {
+    return {
+      kind: "checkbox",
+      label: checkboxMatch[1],
+    };
+  }
+
+  const alphaMatch = line.match(
+    /^(?:[-*+•]\s*)?(?:[（(]?([A-Za-z])[)）.]|([A-Za-z])[、.)])\s*(.+)$/
+  );
+  if (alphaMatch?.[3]) {
+    return {
+      kind: "alpha",
+      label: alphaMatch[3],
+    };
+  }
+
+  const bulletMatch = line.match(/^(?:[-*+•])\s*(.+)$/);
+  if (bulletMatch?.[1]) {
+    return {
+      kind: "bullet",
+      label: bulletMatch[1],
+    };
+  }
+
+  return null;
+}
+
+function splitQuestionBlocks(lines: string[]): QuestionnaireBlock[] {
+  const headingRegex = /^(?:#{1,6}\s*)?(\d{1,2})[.)、]\s*(.+)$/;
+  const blocks: QuestionnaireBlock[] = [];
+  let current: QuestionnaireBlock | null = null;
+
+  for (const line of lines) {
+    const headingMatch = line.match(headingRegex);
+    if (headingMatch?.[2]) {
+      if (current && (current.heading || current.lines.length > 0)) {
+        blocks.push(current);
+      }
+      current = {
+        heading: stripMarkdown(headingMatch[2]),
+        lines: [],
+      };
+      continue;
+    }
+
+    if (!current) {
+      current = {
+        heading: "",
+        lines: [],
+      };
+    }
+
+    current.lines.push(line);
+  }
+
+  if (current && (current.heading || current.lines.length > 0)) {
+    blocks.push(current);
+  }
+
+  return blocks;
+}
+
+function parseQuestionBlock(block: QuestionnaireBlock, fieldIndex: number): QuestionnaireField | null {
+  const questionLike = /(？|\?|是否|什么|哪些|如何|请|可否|希望|范围|标准|流程|目标|方式|输入|支持|约束|边界|模式|产物)/;
+  const promptLineLike = /(？|\?|^(问题[:：]?|请|是否|能否|可否|如何|什么|哪些|从|当))/;
+  const optionCue = /(可选|选项|模式|形式|支持哪些|多选|勾选|例如|请描述)/;
+
+  const normalizedLines = block.lines
+    .map((line) => stripMarkdown(line).replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  if (!block.heading && normalizedLines.length === 0) return null;
+
+  let prompt = "";
+  let promptIndex = -1;
+
+  for (let i = 0; i < normalizedLines.length; i += 1) {
+    const line = normalizedLines[i].replace(/^问题[:：]\s*/, "").trim();
+    if (!line) continue;
+    if (promptLineLike.test(line) && line.length <= 180) {
+      prompt = line;
+      promptIndex = i;
+      break;
+    }
+  }
+
+  if (!prompt) {
+    const headingPrompt = stripMarkdown(block.heading)
+      .replace(/^第?\d{1,2}[章节步]?[：:\s-]*/, "")
+      .trim();
+    if (headingPrompt && (questionLike.test(headingPrompt) || normalizedLines.some((line) => parseOptionLine(line)))) {
+      prompt = headingPrompt;
+    }
+  }
+
+  if (!prompt || prompt.length < 4 || prompt.length > 180) return null;
+
+  const hintParts: string[] = [];
+  const cleanedHeading = stripMarkdown(block.heading).trim();
+  if (cleanedHeading && cleanedHeading !== prompt) {
+    hintParts.push(cleanedHeading);
+  }
+
+  normalizedLines
+    .filter((line) => line !== prompt && /例如[:：]/.test(line) && !parseOptionLine(line))
+    .forEach((line) => hintParts.push(line));
+
+  const optionLines = promptIndex >= 0 ? normalizedLines.slice(promptIndex + 1) : normalizedLines;
+  const rawOptions = optionLines
+    .map((line) => parseOptionLine(line))
+    .filter((item): item is ParsedOption => Boolean(item));
+
+  const hasStrongOptionMarker = rawOptions.some((option) => option.kind !== "bullet");
+  const allowBulletOption = hasStrongOptionMarker || optionCue.test(prompt);
+
+  const seenOption = new Set<string>();
+  const options: QuestionnaireOption[] = [];
+  rawOptions.forEach((option) => {
+    if (option.kind === "bullet" && !allowBulletOption) return;
+
+    const label = stripMarkdown(option.label).replace(/\s+/g, " ").trim();
+    if (!label || label.length > 180 || seenOption.has(label)) return;
+
+    seenOption.add(label);
+    options.push({
+      id: `q${fieldIndex + 1}-o${options.length + 1}`,
+      label,
+      isOther: /(其他|其它|补充|自定义|请描述)/.test(label),
+    });
+  });
+
+  let inputType: QuestionnaireInputType = "text";
+  if (options.length > 0) {
+    const hasCheckbox = rawOptions.some((option) => option.kind === "checkbox");
+    const shouldUseMulti = hasCheckbox || /(可多选|多选|勾选|支持哪些|包括哪些)/.test(prompt);
+    inputType = shouldUseMulti ? "multi" : "single";
+  }
+
+  if (options.length === 0 && !questionLike.test(prompt)) return null;
+
+  return {
+    id: `q${fieldIndex + 1}`,
+    prompt,
+    hint: Array.from(new Set(hintParts))
+      .filter((item) => item && item.length <= 220)
+      .join(" "),
+    inputType,
+    options,
+  };
+}
+
+function parseFallbackQuestions(lines: string[]): QuestionnaireField[] {
+  const questionRegexes = [
+    /^\s*(?:[-*+]\s*)?(?:\d{1,2}[.)、]|[（(]?\d{1,2}[)）]|[一二三四五六七八九十]+[、.])\s*(.+)$/,
+    /^\s*[-*+]\s*\[[ xX]?\]\s*(.+)$/,
+    /^\s*Q\d*[:：]\s*(.+)$/i,
+  ];
+  const questionLike = /([？?]|是否|什么|哪些|如何|请|可否|希望|范围|标准|流程|目标)/;
+  const directQuestionLine = /([？?]|^(请|是否|能否|可否|为什么|如何|哪些|什么))/;
+  const candidates: string[] = [];
+
+  for (const line of lines) {
+    let matched = "";
+    for (const regex of questionRegexes) {
+      const result = line.match(regex);
+      if (result?.[1]) {
+        matched = result[1];
+        break;
+      }
+    }
+
+    if (!matched && line.length <= 120 && directQuestionLine.test(line)) {
+      matched = line;
+    }
+
+    if (!matched) continue;
+
+    const cleaned = stripMarkdown(matched)
+      .replace(/[：:]\s*$/, "")
+      .trim();
+
+    if (cleaned.length < 6 || cleaned.length > 160) continue;
+    if (!questionLike.test(cleaned)) continue;
+    candidates.push(cleaned);
+  }
+
+  return Array.from(new Set(candidates))
+    .slice(0, 12)
+    .map((prompt, index) => ({
+      id: `q${index + 1}`,
+      prompt,
+      hint: "",
+      inputType: "text" as QuestionnaireInputType,
+      options: [],
+    }));
+}
+
+function parseQuestionnaire(markdown: string | null | undefined): ParsedQuestionnaire | null {
+  const normalized = normalizeMarkdownContent(String(markdown ?? ""));
+  if (!normalized) return null;
+
+  const lines = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) return null;
+
+  const questionCues = /(问卷|澄清|请回答|请补充|问题清单|请确认|请提供)/;
+  const directQuestionLine = /([？?]|^(请|是否|能否|可否|为什么|如何|哪些|什么))/;
+
+  let title = "交互式问卷";
+  for (const line of lines) {
+    if (!line.startsWith("#")) continue;
+    const cleaned = stripMarkdown(line);
+    if (cleaned.length >= 4 && cleaned.length <= 48) {
+      title = cleaned;
+      break;
+    }
+  }
+
+  const blocks = splitQuestionBlocks(lines);
+  const parsedQuestions: QuestionnaireField[] = [];
+  const seenPrompt = new Set<string>();
+
+  for (const block of blocks) {
+    const parsed = parseQuestionBlock(block, parsedQuestions.length);
+    if (!parsed) continue;
+    if (seenPrompt.has(parsed.prompt)) continue;
+    seenPrompt.add(parsed.prompt);
+    parsedQuestions.push(parsed);
+  }
+
+  if (parsedQuestions.length < 2) {
+    parseFallbackQuestions(lines).forEach((question) => {
+      if (seenPrompt.has(question.prompt)) return;
+      seenPrompt.add(question.prompt);
+      parsedQuestions.push(question);
+    });
+  }
+
+  const directQuestionCount = parsedQuestions.filter((item) => directQuestionLine.test(item.prompt)).length;
+  const hasSelectableOptions = parsedQuestions.some((item) => item.options.length > 0);
+  const shouldRender = parsedQuestions.length >= 2
+    && (questionCues.test(normalized) || directQuestionCount >= 2 || hasSelectableOptions);
+
+  if (!shouldRender) return null;
+
+  return {
+    key: [
+      title,
+      ...parsedQuestions.map((question) =>
+        `${question.prompt}|${question.inputType}|${question.options.map((option) => option.label).join("&&")}`
+      ),
+    ].join("||"),
+    title,
+    questions: parsedQuestions,
+  };
+}
+
+function buildQuestionnaireReply(
+  questionnaire: ParsedQuestionnaire,
+  answers: Record<string, QuestionnaireAnswer>
+) {
+  const lines: string[] = [`我已完成「${questionnaire.title}」问卷，回答如下：`, ""];
+  let answered = 0;
+
+  questionnaire.questions.forEach((question, index) => {
+    const answer = answers[question.id] ?? createEmptyQuestionnaireAnswer();
+    const optionText = question.options
+      .filter((option) => answer.selectedOptionIds.includes(option.id))
+      .map((option) => option.label)
+      .join("；");
+    const noteText = answer.note.trim();
+    const freeText = answer.text.trim();
+    const answerParts = [optionText, freeText, noteText ? `补充：${noteText}` : ""].filter(Boolean);
+
+    if (answerParts.length === 0) return;
+    answered += 1;
+    lines.push(`${index + 1}. ${question.prompt}`);
+    lines.push(`答：${answerParts.join("\n")}`);
+    lines.push("");
+  });
+
+  if (answered === 0) return "";
+  lines.push("如有遗漏，请继续追问。");
+  return lines.join("\n").trim();
+}
+
 export default function ProjectDetail() {
   const params = useParams();
   const [, setLocation] = useLocation();
   const projectId = Number.parseInt(params.id || "0", 10);
 
-  const [selectedStepNumber, setSelectedStepNumber] = useState(0);
-  const [activeTab, setActiveTab] = useState<PanelTab>("output");
   const [userMessage, setUserMessage] = useState("");
   const [isExecuting, setIsExecuting] = useState(false);
-  const [changeRequest, setChangeRequest] = useState("");
-  const [changeAnalysis, setChangeAnalysis] = useState<ChangeAnalysis | null>(null);
+
   const [uploadScope, setUploadScope] = useState<"project" | "step">("project");
   const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  const [assetPanelCollapsed, setAssetPanelCollapsed] = useState(false);
+  const [previewTarget, setPreviewTarget] = useState<PreviewTarget>(null);
+  const [assetPreviewModalOpen, setAssetPreviewModalOpen] = useState(false);
+  const [questionnaireAnswers, setQuestionnaireAnswers] = useState<Record<string, QuestionnaireAnswer>>({});
+
+  const conversationScrollRef = useRef<HTMLDivElement>(null);
+  const sendLockRef = useRef(false);
+  const pendingConversationSizeRef = useRef(0);
 
   const { data: project, isLoading: projectLoading, refetch: refetchProject } =
     trpc.projects.get.useQuery({ projectId });
   const { data: steps, isLoading: stepsLoading, refetch: refetchSteps } =
     trpc.workflow.getSteps.useQuery({ projectId });
 
-  const { data: conversation, refetch: refetchConversation } = trpc.workflow.getConversation.useQuery(
-    { projectId, stepNumber: selectedStepNumber },
-    { enabled: !!project && selectedStepNumber >= 0 && selectedStepNumber <= 8 }
-  );
+  const activeStepNumber = Math.min(project?.currentStep ?? 0, 8);
+  const workflowCompleted = (project?.currentStep ?? 0) >= 9;
 
-  const { data: agentTrace, refetch: refetchAgentTrace } = trpc.workflow.getAgentTrace.useQuery(
-    { projectId, stepNumber: selectedStepNumber },
-    { enabled: !!project && selectedStepNumber >= 0 && selectedStepNumber <= 8 }
+  const { data: conversation, refetch: refetchConversation } = trpc.workflow.getConversation.useQuery(
+    { projectId, stepNumber: activeStepNumber },
+    { enabled: !!project && activeStepNumber >= 0 && activeStepNumber <= 8 }
   );
 
   const { data: artifactsData, refetch: refetchArtifacts } = trpc.workflow.getArtifacts.useQuery(
-    { projectId, stepNumber: selectedStepNumber, limit: 200 },
-    { enabled: !!project && selectedStepNumber >= 0 && selectedStepNumber <= 8 }
+    { projectId, stepNumber: activeStepNumber, limit: 200 },
+    { enabled: !!project && activeStepNumber >= 0 && activeStepNumber <= 8 }
   );
   const { data: uploadedAssetsData, refetch: refetchUploadedAssets } = trpc.workflow.getAssets.useQuery(
-    { projectId, stepNumber: selectedStepNumber, limit: 120 },
-    { enabled: !!project && selectedStepNumber >= 0 && selectedStepNumber <= 8 }
+    { projectId, stepNumber: activeStepNumber, limit: 120 },
+    { enabled: !!project && activeStepNumber >= 0 && activeStepNumber <= 8 }
   );
 
-  const executeStepMutation = trpc.workflow.executeStep.useMutation();
   const continueConversationMutation = trpc.workflow.continueConversation.useMutation();
-  const confirmStepMutation = trpc.workflow.confirmStep.useMutation();
-  const skipStepMutation = trpc.workflow.skipStep.useMutation();
-  const analyzeChangeMutation = trpc.workflow.analyzeChangeRequest.useMutation();
-  const applyChangeMutation = trpc.workflow.applyChangePlan.useMutation();
   const uploadAssetMutation = trpc.workflow.uploadAsset.useMutation();
 
-  const currentStepNumber = Math.min(project?.currentStep ?? 0, 8);
-  const workflowCompleted = (project?.currentStep ?? 0) >= 9;
-  const selectedStep = steps?.find((step) => step.stepNumber === selectedStepNumber) ?? null;
+  const artifacts = artifactsData?.items ?? [];
+  const uploadedAssets = uploadedAssetsData?.items ?? [];
 
   const completedStepCount = useMemo(
     () => (steps ?? []).filter((step) => step.status === "completed").length,
     [steps]
   );
 
-  const artifacts = artifactsData?.items ?? [];
-  const uploadedAssets = uploadedAssetsData?.items ?? [];
-  const artifactStats = useMemo(() => {
-    const stats = new Map<string, number>();
-    for (const item of artifacts) {
-      stats.set(item.artifactType, (stats.get(item.artifactType) ?? 0) + 1);
+  const progressPercent = Math.round((completedStepCount / 9) * 100);
+
+  const visibleArtifacts = useMemo(() => {
+    const filtered = artifacts.filter(
+      (item) =>
+        USER_VISIBLE_ARTIFACT_TYPES.has(item.artifactType) &&
+        (item.source === "agent" || item.source === "system")
+    );
+    const dedup = new Map<string, (typeof filtered)[number]>();
+
+    for (const artifact of filtered) {
+      const key = `${artifact.artifactType}:${artifact.title}`;
+      if (!dedup.has(key)) {
+        dedup.set(key, artifact);
+      }
     }
-    return Array.from(stats.entries()).sort((a, b) => b[1] - a[1]);
+
+    return Array.from(dedup.values());
   }, [artifacts]);
 
-  const progress = Math.round((completedStepCount / 9) * 100);
-  const selectedIsCurrent = !workflowCompleted && selectedStepNumber === currentStepNumber;
-  const selectedAheadOfCurrent = !workflowCompleted && selectedStepNumber > currentStepNumber;
+  const inlineArtifacts = useMemo(
+    () => visibleArtifacts.filter((item) => item.artifactType !== "step_input").slice(0, 3),
+    [visibleArtifacts]
+  );
+
+  const previewArtifact =
+    previewTarget?.kind === "artifact"
+      ? visibleArtifacts.find((item) => item.id === previewTarget.id) ?? null
+      : null;
+
+  const previewUpload =
+    previewTarget?.kind === "upload"
+      ? uploadedAssets.find((item) => item.id === previewTarget.id) ?? null
+      : null;
+
+  const openAssetPreview = (target: Exclude<PreviewTarget, null>) => {
+    setPreviewTarget(target);
+    setAssetPreviewModalOpen(true);
+  };
+
+  const activeStep = steps?.find((item) => item.stepNumber === activeStepNumber) ?? null;
+
+  const latestAssistantMessage = useMemo(() => {
+    const history = conversation ?? [];
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i]?.role === "assistant") {
+        return history[i];
+      }
+    }
+    return null;
+  }, [conversation]);
+
+  const questionnaireSourceText = latestAssistantMessage?.content
+    ?? (typeof activeStep?.output?.text === "string" ? activeStep.output.text : "");
+
+  const activeQuestionnaire = useMemo(
+    () => parseQuestionnaire(questionnaireSourceText),
+    [questionnaireSourceText]
+  );
+
+  const answeredQuestionCount = useMemo(() => {
+    if (!activeQuestionnaire) return 0;
+    return activeQuestionnaire.questions.reduce((count, item) => {
+      return count + (hasQuestionnaireAnswer(questionnaireAnswers[item.id]) ? 1 : 0);
+    }, 0);
+  }, [activeQuestionnaire, questionnaireAnswers]);
 
   useEffect(() => {
-    if (!project) return;
-    setSelectedStepNumber(Math.min(project.currentStep, 8));
-  }, [project?.id]);
+    if (visibleArtifacts.length > 0) {
+      setPreviewTarget((prev) => {
+        if (prev?.kind === "artifact" && visibleArtifacts.some((item) => item.id === prev.id)) {
+          return prev;
+        }
+        return { kind: "artifact", id: visibleArtifacts[0].id };
+      });
+      return;
+    }
+
+    if (uploadedAssets.length > 0) {
+      setPreviewTarget((prev) => {
+        if (prev?.kind === "upload" && uploadedAssets.some((item) => item.id === prev.id)) {
+          return prev;
+        }
+        return { kind: "upload", id: uploadedAssets[0].id };
+      });
+      return;
+    }
+
+    setPreviewTarget(null);
+  }, [visibleArtifacts, uploadedAssets]);
+
+  useEffect(() => {
+    const node = conversationScrollRef.current;
+    if (!node) return;
+
+    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+  }, [conversation?.length, isExecuting]);
+
+  useEffect(() => {
+    if (!activeQuestionnaire) {
+      setQuestionnaireAnswers({});
+      return;
+    }
+
+    setQuestionnaireAnswers((current) => {
+      const next: Record<string, QuestionnaireAnswer> = {};
+      activeQuestionnaire.questions.forEach((question) => {
+        const previous = current[question.id] ?? createEmptyQuestionnaireAnswer();
+        const validOptionIds = new Set(question.options.map((option) => option.id));
+        next[question.id] = {
+          text: previous.text,
+          note: previous.note,
+          selectedOptionIds: previous.selectedOptionIds.filter((optionId) => validOptionIds.has(optionId)),
+        };
+      });
+      return next;
+    });
+  }, [activeQuestionnaire?.key]);
+
+  useEffect(() => {
+    if (!isExecuting) return;
+
+    const timer = window.setInterval(() => {
+      void refetchProject();
+      void refetchSteps();
+      void refetchConversation();
+      void refetchArtifacts();
+      void refetchUploadedAssets();
+    }, 2200);
+
+    return () => window.clearInterval(timer);
+  }, [
+    isExecuting,
+    refetchArtifacts,
+    refetchConversation,
+    refetchProject,
+    refetchSteps,
+    refetchUploadedAssets,
+  ]);
+
+  useEffect(() => {
+    if (!isExecuting) return;
+
+    const history = conversation ?? [];
+    const hasNewAssistantReply = history
+      .slice(pendingConversationSizeRef.current)
+      .some((item) => item.role === "assistant");
+
+    if (!hasNewAssistantReply) return;
+
+    sendLockRef.current = false;
+    setIsExecuting(false);
+  }, [conversation, isExecuting]);
 
   const refetchAllForSelected = async () => {
     await Promise.all([
       refetchProject(),
       refetchSteps(),
       refetchConversation(),
-      refetchAgentTrace(),
       refetchArtifacts(),
       refetchUploadedAssets(),
     ]);
   };
 
-  const handleExecuteStep = async () => {
-    if (!project) return;
-    if (selectedAheadOfCurrent) {
-      toast.error("请先完成前置步骤");
-      return;
-    }
+  const handleContinueConversation = async (message: string) => {
+    if (!project || !message.trim() || sendLockRef.current) return;
 
+    const content = message.trim();
+    pendingConversationSizeRef.current = conversation?.length ?? 0;
+    sendLockRef.current = true;
     setIsExecuting(true);
-    try {
-      await executeStepMutation.mutateAsync({
-        projectId: project.id,
-        stepNumber: selectedStepNumber,
-      });
-      await refetchAllForSelected();
-      setActiveTab("trace");
-      toast.success(`Step ${selectedStepNumber + 1} 执行完成`);
-    } catch (error: any) {
-      toast.error(error.message || "执行失败");
-    } finally {
-      setIsExecuting(false);
-    }
-  };
+    setUserMessage("");
 
-  const handleContinueConversation = async () => {
-    if (!project || !userMessage.trim()) return;
-
-    setIsExecuting(true);
     try {
       await continueConversationMutation.mutateAsync({
         projectId: project.id,
-        stepNumber: selectedStepNumber,
-        userMessage: userMessage.trim(),
+        stepNumber: activeStepNumber,
+        userMessage: content,
       });
-      setUserMessage("");
+
       await refetchAllForSelected();
-      setActiveTab("chat");
       toast.success("Agent 已完成新一轮打磨");
     } catch (error: any) {
+      setUserMessage((current) => (current.trim() ? current : content));
       toast.error(error.message || "对话失败");
     } finally {
+      sendLockRef.current = false;
       setIsExecuting(false);
     }
   };
 
-  const handleMessageKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+  const handleMessageKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      void handleContinueConversation();
+      void handleSendMessage();
     }
   };
 
-  const handleConfirmCurrentStep = async () => {
-    if (!project || !selectedIsCurrent) return;
+  const handleSendMessage = async () => {
+    if (sendLockRef.current || isExecuting) return;
 
-    try {
-      const result = await confirmStepMutation.mutateAsync({
-        projectId: project.id,
-        stepNumber: selectedStepNumber,
-      });
-      await refetchProject();
-      await refetchSteps();
-
-      const nextStep = Math.min(result.nextStep, 8);
-      setSelectedStepNumber(nextStep);
-      await Promise.all([
-        refetchConversation(),
-        refetchAgentTrace(),
-        refetchArtifacts(),
-        refetchUploadedAssets(),
-      ]);
-      toast.success(
-        result.nextStep >= 9
-          ? "恭喜，9 个步骤已全部完成"
-          : `已进入 Step ${result.nextStep + 1}`
-      );
-    } catch (error: any) {
-      toast.error(error.message || "确认失败");
-    }
+    const content = userMessage.trim();
+    if (!content) return;
+    await handleContinueConversation(content);
   };
 
-  const handleSkipCurrentStep = async () => {
-    if (!project || !selectedIsCurrent) return;
-
-    try {
-      await skipStepMutation.mutateAsync({
-        projectId: project.id,
-        stepNumber: selectedStepNumber,
-      });
-      await refetchProject();
-      await refetchSteps();
-      const nextStep = Math.min((project.currentStep ?? 0) + 1, 8);
-      setSelectedStepNumber(nextStep);
-      await Promise.all([
-        refetchConversation(),
-        refetchAgentTrace(),
-        refetchArtifacts(),
-        refetchUploadedAssets(),
-      ]);
-      toast.success("已跳过当前步骤");
-    } catch (error: any) {
-      toast.error(error.message || "跳过失败");
-    }
+  const handleQuestionnaireAnswerChange = (questionId: string, value: string) => {
+    setQuestionnaireAnswers((current) => ({
+      ...current,
+      [questionId]: {
+        ...(current[questionId] ?? createEmptyQuestionnaireAnswer()),
+        text: value,
+      },
+    }));
   };
 
-  const handleAnalyzeChangeRequest = async () => {
-    if (!project || !changeRequest.trim()) {
-      toast.error("请先输入变更诉求");
+  const handleQuestionnaireNoteChange = (questionId: string, value: string) => {
+    setQuestionnaireAnswers((current) => ({
+      ...current,
+      [questionId]: {
+        ...(current[questionId] ?? createEmptyQuestionnaireAnswer()),
+        note: value,
+      },
+    }));
+  };
+
+  const handleQuestionnaireOptionChange = (
+    question: QuestionnaireField,
+    optionId: string,
+    checked: boolean
+  ) => {
+    setQuestionnaireAnswers((current) => {
+      const previous = current[question.id] ?? createEmptyQuestionnaireAnswer();
+      const selectedOptionIds = question.inputType === "single"
+        ? (checked ? [optionId] : [])
+        : (
+          checked
+            ? Array.from(new Set([...previous.selectedOptionIds, optionId]))
+            : previous.selectedOptionIds.filter((id) => id !== optionId)
+        );
+
+      return {
+        ...current,
+        [question.id]: {
+          ...previous,
+          selectedOptionIds,
+        },
+      };
+    });
+  };
+
+  const handleSubmitQuestionnaire = async () => {
+    if (!activeQuestionnaire || sendLockRef.current || isExecuting) return;
+
+    const userReply = buildQuestionnaireReply(activeQuestionnaire, questionnaireAnswers);
+    if (!userReply) {
+      toast.error("请先填写至少一个问题");
       return;
     }
 
-    try {
-      const result = await analyzeChangeMutation.mutateAsync({
-        projectId: project.id,
-        changeRequest: changeRequest.trim(),
-      });
-      setChangeAnalysis(result);
-      toast.success(`已完成分析：建议从 Step ${result.recommendedStartStep + 1} 继续`);
-    } catch (error: any) {
-      toast.error(error.message || "变更分析失败");
-    }
+    await handleContinueConversation(userReply);
   };
 
-  const handleApplyChangePlan = async () => {
-    if (!project || !changeAnalysis) return;
+  const questionnaireMessageId = activeQuestionnaire && latestAssistantMessage
+    ? latestAssistantMessage.id
+    : null;
 
-    try {
-      await applyChangeMutation.mutateAsync({
-        projectId: project.id,
-        startStep: changeAnalysis.recommendedStartStep,
-        changeRequest: changeRequest.trim() || undefined,
-      });
+  const showStepOutputQuestionnaire = Boolean(
+    activeQuestionnaire
+    && !latestAssistantMessage
+    && activeStep?.output?.text
+  );
 
-      setSelectedStepNumber(changeAnalysis.recommendedStartStep);
-      await refetchAllForSelected();
-      toast.success(`已切换到 Step ${changeAnalysis.recommendedStartStep + 1} 重新迭代`);
-    } catch (error: any) {
-      toast.error(error.message || "应用迭代计划失败");
-    }
+  const renderQuestionnaireCard = () => {
+    if (!activeQuestionnaire) return null;
+
+    return (
+      <div className="questionnaire-card">
+        <div className="questionnaire-header">
+          <h3>{activeQuestionnaire.title}</h3>
+          <p>直接勾选选项并补充说明，提交后系统会自动整理成结构化回复。</p>
+        </div>
+
+        <div className="questionnaire-fields">
+          {activeQuestionnaire.questions.map((question, index) => {
+            const answer = questionnaireAnswers[question.id] ?? createEmptyQuestionnaireAnswer();
+            const selectedOptionIds = new Set(answer.selectedOptionIds);
+            const showNoteInput = question.options.some(
+              (option) => option.isOther && selectedOptionIds.has(option.id)
+            );
+
+            return (
+              <div key={question.id} className="questionnaire-field">
+                <span className="questionnaire-label">
+                  {index + 1}. {question.prompt}
+                </span>
+                {question.hint ? (
+                  <span className="questionnaire-hint">{question.hint}</span>
+                ) : null}
+
+                {question.options.length > 0 ? (
+                  <div className={`questionnaire-options ${question.inputType}`}>
+                    {question.options.map((option) => (
+                      <label
+                        key={option.id}
+                        className={`questionnaire-option ${selectedOptionIds.has(option.id) ? "active" : ""}`}
+                      >
+                        <input
+                          type={question.inputType === "single" ? "radio" : "checkbox"}
+                          name={question.id}
+                          checked={selectedOptionIds.has(option.id)}
+                          onChange={(event) =>
+                            handleQuestionnaireOptionChange(question, option.id, event.target.checked)
+                          }
+                        />
+                        <span>{option.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+
+                {question.options.length === 0 ? (
+                  <textarea
+                    className="questionnaire-input"
+                    value={answer.text}
+                    onChange={(event) => handleQuestionnaireAnswerChange(question.id, event.target.value)}
+                    placeholder="请填写你的回答..."
+                    rows={3}
+                  />
+                ) : (
+                  <div className="questionnaire-followup">
+                    {showNoteInput ? (
+                      <textarea
+                        className="questionnaire-input"
+                        value={answer.note}
+                        onChange={(event) => handleQuestionnaireNoteChange(question.id, event.target.value)}
+                        placeholder="请补充“其他”选项的说明..."
+                        rows={2}
+                      />
+                    ) : null}
+                    <textarea
+                      className="questionnaire-input compact"
+                      value={answer.text}
+                      onChange={(event) => handleQuestionnaireAnswerChange(question.id, event.target.value)}
+                      placeholder="可选：补充细节、限制条件或例外情况..."
+                      rows={2}
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="questionnaire-actions">
+          <span className="questionnaire-meta">
+            已填写 {answeredQuestionCount}/{activeQuestionnaire.questions.length}
+          </span>
+          <button
+            type="button"
+            className="questionnaire-submit"
+            onClick={() => {
+              void handleSubmitQuestionnaire();
+            }}
+            disabled={isExecuting}
+          >
+            完成并提交问卷
+          </button>
+        </div>
+      </div>
+    );
   };
 
   const openUploadDialog = (scope: "project" | "step") => {
@@ -324,7 +907,7 @@ export default function ProjectDetail() {
     uploadInputRef.current?.click();
   };
 
-  const handleAssetUpload: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
+  const handleAssetUpload: ChangeEventHandler<HTMLInputElement> = async (event) => {
     if (!project) return;
     const files = Array.from(event.target.files ?? []);
     if (files.length === 0) return;
@@ -338,16 +921,15 @@ export default function ProjectDetail() {
 
         const base64Data = await fileToBase64(file);
         const mimeType = file.type || "application/octet-stream";
-        const assetType =
-          mimeType.startsWith("image/")
-            ? "image"
-            : mimeType.includes("pdf") || mimeType.startsWith("text/") || mimeType.includes("officedocument")
+        const assetType = mimeType.startsWith("image/")
+          ? "image"
+          : mimeType.includes("pdf") || mimeType.startsWith("text/") || mimeType.includes("officedocument")
             ? "document"
             : "other";
 
         await uploadAssetMutation.mutateAsync({
           projectId: project.id,
-          stepNumber: uploadScope === "step" ? selectedStepNumber : undefined,
+          stepNumber: uploadScope === "step" ? activeStepNumber : undefined,
           scope: uploadScope,
           assetType,
           fileName: file.name,
@@ -357,7 +939,7 @@ export default function ProjectDetail() {
       }
 
       await refetchAllForSelected();
-      setActiveTab("artifacts");
+      setAssetPanelCollapsed(false);
       toast.success("资产上传完成");
     } catch (error: any) {
       toast.error(error.message || "上传失败");
@@ -368,31 +950,30 @@ export default function ProjectDetail() {
 
   if (projectLoading || stepsLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[linear-gradient(180deg,oklch(0.98_0.01_250),oklch(0.97_0.015_240)_45%,oklch(0.98_0.01_85))]">
-        <Loader2 className="h-8 w-8 animate-spin text-[oklch(0.5_0.05_240)]" />
+      <div className="pf-page flex min-h-screen items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-[var(--pf-text-secondary)]" />
       </div>
     );
   }
 
   if (!project) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[linear-gradient(180deg,oklch(0.98_0.01_250),oklch(0.97_0.015_240)_45%,oklch(0.98_0.01_85))]">
-        <Card className="w-full max-w-md border-[oklch(0.84_0.03_242)] bg-white/90">
-          <CardHeader>
-            <CardTitle>项目不存在</CardTitle>
-            <CardDescription>该项目可能已删除或您没有访问权限。</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button onClick={() => setLocation("/")}>返回首页</Button>
-          </CardContent>
-        </Card>
+      <div className="pf-page flex min-h-screen items-center justify-center px-4">
+        <div className="pf-side-card max-w-lg">
+          <h3>项目不存在</h3>
+          <p>该项目可能已删除或你没有访问权限。</p>
+          <div className="pf-side-buttons">
+            <button type="button" className="pf-btn-primary" onClick={() => setLocation("/")}>
+              返回首页
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="relative min-h-screen bg-[linear-gradient(180deg,oklch(0.98_0.01_250),oklch(0.97_0.015_240)_45%,oklch(0.98_0.01_85))] text-[oklch(0.28_0.03_246)]">
-      <div className="pointer-events-none absolute inset-0 opacity-35 [background-image:linear-gradient(to_right,oklch(0.72_0.03_244/.2)_1px,transparent_1px),linear-gradient(to_bottom,oklch(0.72_0.03_244/.2)_1px,transparent_1px)] [background-size:48px_48px]" />
+    <div className="pf-page pf-workspace-page">
       <input
         ref={uploadInputRef}
         type="file"
@@ -402,565 +983,362 @@ export default function ProjectDetail() {
         onChange={handleAssetUpload}
       />
 
-      <header className="sticky top-0 z-20 border-b border-[oklch(0.84_0.03_242)] bg-white/80 backdrop-blur-xl">
-        <div className="container flex items-center justify-between py-4">
-          <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="hover:bg-[oklch(0.95_0.02_240)]"
-              onClick={() => setLocation("/")}
-            >
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              返回项目列表
-            </Button>
-            <div>
-              <h1 className="font-display text-2xl text-[oklch(0.25_0.04_246)]">{project.title}</h1>
-              <p className="text-sm text-[oklch(0.43_0.03_242)]">
-                {workflowCompleted
-                  ? "全部流程已完成"
-                  : `当前推进：Step ${currentStepNumber + 1} · ${STEP_META[currentStepNumber]?.title}`}
-              </p>
+      <header className="topbar">
+        <div className="topbar-left">
+          <button type="button" className="topbar-btn" onClick={() => setLocation("/")}>
+            <ArrowLeft className="h-4 w-4" />
+            返回
+          </button>
+          <span className="topbar-brand">ProductFlow</span>
+          <span className="topbar-sep" />
+          <span className="topbar-project">{project.title}</span>
+        </div>
+
+        <div className="topbar-right">
+          <div className="topbar-progress">
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
             </div>
+            <span>{completedStepCount}/9</span>
           </div>
-          <Badge
-            className={
-              workflowCompleted
-                ? "border border-emerald-600/25 bg-emerald-500/15 text-emerald-700"
-                : "border border-[oklch(0.8_0.05_242)] bg-[oklch(0.94_0.03_240)] text-[oklch(0.33_0.05_242)]"
-            }
+
+          <div className="topbar-step-pill">
+            当前 Step {activeStepNumber + 1}/9
+          </div>
+
+          <button
+            type="button"
+            className="topbar-btn"
+            onClick={() => setLocation("/settings")}
           >
-            {workflowCompleted ? "已完成" : "进行中"}
-          </Badge>
+            <Settings2 className="h-4 w-4" />
+            设置
+          </button>
+
+          <button
+            type="button"
+            className="topbar-btn"
+            onClick={() => setAssetPanelCollapsed((prev) => !prev)}
+          >
+            <LayoutPanelTop className="h-4 w-4" />
+            资产
+          </button>
         </div>
       </header>
 
-      <main className="container relative py-6">
-        <div className="grid gap-5 xl:grid-cols-[300px_1fr_340px]">
-          <aside className="space-y-4">
-            <Card className="border-[oklch(0.84_0.03_242)] bg-white/86 shadow-sm">
-              <CardHeader>
-                <CardTitle className="text-base text-[oklch(0.27_0.04_246)]">执行总览</CardTitle>
-                <CardDescription>完成 {completedStepCount}/9 · 进度 {progress}%</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Progress value={progress} className="mb-4" />
-                <div className="space-y-4">
-                  {PHASES.map((phase) => (
-                    <div key={phase.name}>
-                      <p className="mb-2 text-xs uppercase tracking-[0.16em] text-[oklch(0.48_0.03_242)]">
-                        {phase.name}
-                      </p>
-                      <div className="space-y-1.5">
-                        {phase.stepNumbers.map((stepNumber) => {
-                          const step = steps?.find((item) => item.stepNumber === stepNumber);
-                          const status = step?.status ?? "pending";
-                          const selected = stepNumber === selectedStepNumber;
-                          const isCurrent = !workflowCompleted && stepNumber === currentStepNumber;
-                          return (
-                            <button
-                              key={stepNumber}
-                              type="button"
-                              onClick={() => {
-                                setSelectedStepNumber(stepNumber);
-                                setActiveTab("output");
-                              }}
-                              className={`flex w-full items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition ${
-                                selected
-                                  ? "border-[oklch(0.72_0.09_242)] bg-[oklch(0.95_0.03_240)]"
-                                  : "border-[oklch(0.86_0.03_242)] bg-white/82 hover:border-[oklch(0.78_0.05_242)]"
-                              }`}
-                            >
-                              <div className="flex h-5 w-5 items-center justify-center">
-                                {status === "completed" ? (
-                                  <Check className="h-4 w-4 text-emerald-500" />
-                                ) : isCurrent ? (
-                                  <CircleDot className="h-4 w-4 text-[oklch(0.54_0.13_240)]" />
-                                ) : (
-                                  <div className="h-2 w-2 rounded-full bg-[oklch(0.74_0.03_242)]" />
-                                )}
-                              </div>
-                              <div className="min-w-0 flex-1">
-                                <p className="truncate text-sm font-medium text-[oklch(0.29_0.04_246)]">
-                                  Step {stepNumber + 1}
-                                </p>
-                                <p className="truncate text-xs text-[oklch(0.43_0.03_242)]">
-                                  {STEP_META[stepNumber]?.title}
-                                </p>
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
+      <div className="main">
+        <div className="conversation-area">
+          <div ref={conversationScrollRef} className="conversation-scroll">
+            <div className="conversation-inner stagger">
+              <section>
+                <div className="workflow-guidance">
+                  <p className="workflow-guidance-title">
+                    流程共 9 步：需求定向(1-3) → 方案设计(4-6) → 交付沉淀(7-9)
+                  </p>
+                  <p className="workflow-guidance-desc">
+                    当前 Step {activeStepNumber + 1}/9 · {STEP_META[activeStepNumber]?.title}。如果需要修改前序步骤，直接在当前对话里提出变更即可，无需手动回跳步骤。
+                  </p>
                 </div>
-              </CardContent>
-            </Card>
-          </aside>
 
-          <section className="space-y-4">
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.25 }}
-            >
-              <Card className="border-[oklch(0.84_0.03_242)] bg-white/88 shadow-sm">
-                <CardHeader className="pb-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.16em] text-[oklch(0.48_0.03_242)]">
-                        {STEP_META[selectedStepNumber]?.phase}
-                      </p>
-                      <CardTitle className="mt-1 text-[oklch(0.26_0.04_246)]">
-                        Step {selectedStepNumber + 1} · {STEP_META[selectedStepNumber]?.title}
-                      </CardTitle>
-                      <CardDescription className="mt-1">
-                        {selectedAheadOfCurrent
-                          ? "该步骤尚未解锁，需要先完成前置步骤。"
-                          : selectedIsCurrent
-                          ? "当前步骤可执行、可继续打磨，并确认进入下一步。"
-                          : "这是历史步骤，可查看结果，也可重跑该步骤。"}
-                      </CardDescription>
+                <div className="step-divider">
+                  <div className="step-divider-line" />
+                  <span className="step-divider-label">Step {activeStepNumber + 1}</span>
+                  <span className="step-divider-title">{STEP_META[activeStepNumber]?.title}</span>
+                  <span className={`step-divider-status ${workflowCompleted ? "" : "active"}`}>
+                    <span className="dot" />
+                    {workflowCompleted ? "完成" : "进行中"}
+                  </span>
+                  <div className="step-divider-line" />
+                </div>
+
+                {activeStep?.output?.text && !(conversation ?? []).some((item) => item.role === "assistant") ? (
+                  <div className="message agent">
+                    <div className="message-header">
+                      <div className="message-avatar agent">P</div>
+                      <span className="message-sender">ProductFlow</span>
+                      <span className="message-time">{formatDate(activeStep.updatedAt)}</span>
                     </div>
-                    <Badge
-                      className={
-                        selectedStep?.status === "completed"
-                          ? "border border-emerald-600/25 bg-emerald-500/15 text-emerald-700"
-                          : "border border-[oklch(0.82_0.04_242)] bg-[oklch(0.94_0.03_240)] text-[oklch(0.34_0.05_242)]"
-                      }
-                    >
-                      {selectedStep?.status === "completed" ? "已完成" : selectedStep?.status ?? "pending"}
-                    </Badge>
-                  </div>
-                </CardHeader>
-              </Card>
-            </motion.div>
-
-            <Card className="border-[oklch(0.84_0.03_242)] bg-white/88 shadow-sm">
-              <CardContent className="p-5">
-                <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as PanelTab)}>
-                  <TabsList className="grid h-auto w-full grid-cols-4 rounded-xl border border-[oklch(0.85_0.03_242)] bg-[oklch(0.97_0.02_238)] p-1">
-                    <TabsTrigger value="output" className="rounded-lg">
-                      <Sparkles className="h-4 w-4" />
-                      结果
-                    </TabsTrigger>
-                    <TabsTrigger value="chat" className="rounded-lg">
-                      <MessageSquare className="h-4 w-4" />
-                      对话
-                    </TabsTrigger>
-                    <TabsTrigger value="artifacts" className="rounded-lg">
-                      <Database className="h-4 w-4" />
-                      资产
-                    </TabsTrigger>
-                    <TabsTrigger value="trace" className="rounded-lg">
-                      <Bot className="h-4 w-4" />
-                      轨迹
-                    </TabsTrigger>
-                  </TabsList>
-
-                  <TabsContent value="output" className="mt-4">
-                    {selectedStep?.output?.text ? (
-                      <div className="rounded-2xl border border-[oklch(0.85_0.03_242)] bg-white p-4">
-                        <div className="prose prose-sm max-w-none prose-headings:text-[oklch(0.28_0.04_246)] prose-p:text-[oklch(0.37_0.03_242)]">
-                          <Streamdown>{String(selectedStep.output.text)}</Streamdown>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="rounded-2xl border border-dashed border-[oklch(0.84_0.03_242)] bg-[oklch(0.98_0.02_238)] p-10 text-center text-sm text-[oklch(0.44_0.03_242)]">
-                        当前步骤还没有输出结果。点击右侧“运行 Agent”开始执行。
-                      </div>
-                    )}
-                  </TabsContent>
-
-                  <TabsContent value="chat" className="mt-4 space-y-4">
-                    <div className="rounded-2xl border border-[oklch(0.84_0.03_242)] bg-[linear-gradient(180deg,white,oklch(0.98_0.02_238))] p-3">
-                      <div className="max-h-[390px] space-y-3 overflow-auto rounded-xl border border-[oklch(0.9_0.02_242)] bg-white/80 p-3">
-                        {conversation && conversation.length > 0 ? (
-                          conversation.map((msg) => (
-                            <div
-                              key={msg.id}
-                              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-                            >
-                              <div
-                                className={`max-w-[86%] rounded-2xl border px-3 py-2 text-sm ${
-                                  msg.role === "user"
-                                    ? "border-transparent bg-[linear-gradient(135deg,oklch(0.56_0.15_236),oklch(0.64_0.16_253))] text-white"
-                                    : "border-[oklch(0.86_0.03_242)] bg-white text-[oklch(0.32_0.03_242)]"
-                                }`}
-                              >
-                                <div className="mb-1 flex items-center justify-between gap-2 text-[11px] opacity-70">
-                                  <span>{msg.role === "user" ? "你" : msg.role === "assistant" ? "Agent" : "系统"}</span>
-                                  <span>{formatDate(msg.createdAt)}</span>
-                                </div>
-                                <p className="whitespace-pre-wrap leading-6">{msg.content}</p>
-                              </div>
-                            </div>
-                          ))
-                        ) : (
-                          <p className="p-4 text-sm text-[oklch(0.44_0.03_242)]">
-                            还没有对话记录。先运行该步骤后再继续提问。
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="mt-3 rounded-xl border border-[oklch(0.84_0.03_242)] bg-white px-3 py-2 text-xs text-[oklch(0.4_0.03_242)]">
-                        当前步骤可用资料：{uploadedAssets.length} 个（文档/图片会自动纳入 Agent 上下文）
-                      </div>
-
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {CHAT_QUICK_PROMPTS.map((prompt) => (
-                          <button
-                            key={prompt}
-                            type="button"
-                            className="rounded-full border border-[oklch(0.84_0.03_242)] bg-white px-3 py-1 text-xs text-[oklch(0.36_0.03_242)] hover:border-[oklch(0.74_0.08_242)]"
-                            onClick={() => setUserMessage(prompt)}
-                          >
-                            {prompt}
-                          </button>
-                        ))}
-                      </div>
-
-                      <div className="mt-3 space-y-2">
-                        <Textarea
-                          value={userMessage}
-                          onChange={(event) => setUserMessage(event.target.value)}
-                          onKeyDown={handleMessageKeyDown}
-                          placeholder="输入你的修改意见（Ctrl/Cmd + Enter 发送）..."
-                          className="min-h-[120px] border-[oklch(0.84_0.03_242)] bg-white"
-                        />
-                        <Button
-                          onClick={handleContinueConversation}
-                          disabled={isExecuting || !userMessage.trim() || selectedAheadOfCurrent}
-                          className="w-full bg-[linear-gradient(135deg,oklch(0.56_0.15_236),oklch(0.64_0.16_253))] text-white hover:brightness-105"
-                        >
-                          {isExecuting ? (
-                            <>
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                              Agent 回复中...
-                            </>
-                          ) : (
-                            <>
-                              <Send className="mr-2 h-4 w-4" />
-                              发送并继续打磨
-                            </>
-                          )}
-                        </Button>
-                      </div>
-                    </div>
-                  </TabsContent>
-
-                  <TabsContent value="artifacts" className="mt-4 space-y-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="border-[oklch(0.82_0.05_242)] bg-white"
-                        onClick={() => openUploadDialog("project")}
-                        disabled={uploadAssetMutation.isPending}
-                      >
-                        {uploadAssetMutation.isPending ? (
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        ) : (
-                          <Database className="mr-2 h-4 w-4" />
-                        )}
-                        上传到项目资料库
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="border-[oklch(0.82_0.05_242)] bg-white"
-                        onClick={() => openUploadDialog("step")}
-                        disabled={uploadAssetMutation.isPending}
-                      >
-                        <FileText className="mr-2 h-4 w-4" />
-                        上传到当前步骤
-                      </Button>
-                      <span className="text-xs text-[oklch(0.44_0.03_242)]">
-                        支持 PDF / Word / 文本 / 图片，单文件不超过 15MB
-                      </span>
-                    </div>
-
-                    {uploadedAssets.length > 0 ? (
-                      <div className="space-y-2 rounded-2xl border border-[oklch(0.84_0.03_242)] bg-white p-3">
-                        <p className="text-sm font-medium text-[oklch(0.29_0.04_246)]">已上传资料</p>
-                        <div className="max-h-[240px] space-y-2 overflow-auto">
-                          {uploadedAssets.map((asset) => (
-                            <div
-                              key={asset.id}
-                              className="rounded-xl border border-[oklch(0.86_0.03_242)] bg-[oklch(0.99_0.01_240)] p-3"
-                            >
-                              <div className="mb-1 flex flex-wrap items-center gap-2">
-                                <Badge variant="outline" className="text-[11px]">
-                                  {asset.assetType}
-                                </Badge>
-                                <Badge variant="outline" className="text-[11px]">
-                                  {asset.scope}
-                                </Badge>
-                                <span className="text-[11px] text-[oklch(0.45_0.03_242)]">
-                                  {formatDate(asset.createdAt)}
-                                </span>
-                              </div>
-                              <p className="text-sm font-medium text-[oklch(0.29_0.04_246)]">{asset.fileName}</p>
-                              <p className="text-xs text-[oklch(0.42_0.03_242)]">
-                                {asset.mimeType} · {(asset.fileSize / 1024).toFixed(1)} KB
-                              </p>
-                              {asset.note ? (
-                                <p className="mt-1 text-xs text-[oklch(0.42_0.03_242)]">{asset.note}</p>
-                              ) : null}
-                              {asset.url ? (
-                                <a
-                                  href={asset.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="mt-1 inline-block text-xs text-[oklch(0.52_0.14_240)] underline"
-                                >
-                                  打开预览
-                                </a>
-                              ) : (
-                                <p className="mt-1 text-xs text-[oklch(0.45_0.03_242)]">预览地址不可用</p>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="rounded-2xl border border-dashed border-[oklch(0.84_0.03_242)] bg-[oklch(0.98_0.02_238)] p-6 text-center text-sm text-[oklch(0.44_0.03_242)]">
-                        还没有上传资料。可先上传原始需求文档、原型截图、调研材料，再让 Agent 自动引用。
-                      </div>
-                    )}
-
-                    <div className="flex flex-wrap gap-2">
-                      {artifactStats.map(([type, count]) => (
-                        <Badge key={type} variant="outline" className="bg-white text-xs">
-                          {type} · {count}
-                        </Badge>
-                      ))}
-                    </div>
-
-                    {artifacts.length > 0 ? (
-                      <div className="max-h-[420px] space-y-2 overflow-auto rounded-2xl border border-[oklch(0.84_0.03_242)] bg-white p-3">
-                        {artifacts.map((artifact) => (
-                          <div key={artifact.id} className="rounded-xl border border-[oklch(0.86_0.03_242)] bg-[oklch(0.99_0.01_240)] p-3">
-                            <div className="mb-1 flex flex-wrap items-center gap-2">
-                              <Badge variant="outline" className="text-[11px]">
-                                {artifact.artifactType}
-                              </Badge>
-                              {typeof artifact.iteration === "number" ? (
-                                <Badge variant="outline" className="text-[11px]">
-                                  round {artifact.iteration}
-                                </Badge>
-                              ) : null}
-                              <span className="text-[11px] text-[oklch(0.45_0.03_242)]">{formatDate(artifact.createdAt)}</span>
-                            </div>
-                            <p className="mb-1 text-sm font-medium text-[oklch(0.29_0.04_246)]">{artifact.title}</p>
-                            <p className="whitespace-pre-wrap text-xs leading-6 text-[oklch(0.39_0.03_242)]">{artifact.content}</p>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="rounded-2xl border border-dashed border-[oklch(0.84_0.03_242)] bg-[oklch(0.98_0.02_238)] p-10 text-center text-sm text-[oklch(0.44_0.03_242)]">
-                        当前步骤还没有可展示资产。运行步骤或发起对话后会自动沉淀。
-                      </div>
-                    )}
-                  </TabsContent>
-
-                  <TabsContent value="trace" className="mt-4">
-                    {agentTrace?.run ? (
-                      <div className="space-y-3">
-                        <div className="rounded-2xl border border-[oklch(0.84_0.03_242)] bg-[oklch(0.97_0.02_238)] px-3 py-2 text-xs text-[oklch(0.4_0.03_242)]">
-                          Run #{agentTrace.run.id} · {agentTrace.run.strategy} · {agentTrace.run.status}
-                          {" · "}stage: {agentTrace.run.currentStage}
-                          {" · "}round: {agentTrace.run.currentIteration}
-                        </div>
-                        <div className="space-y-2">
-                          {agentTrace.actions.map((action, index) => (
-                            <div key={action.id} className="rounded-2xl border border-[oklch(0.84_0.03_242)] bg-white p-3">
-                              <div className="mb-2 flex items-center gap-2">
-                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[oklch(0.94_0.03_240)] text-[11px] text-[oklch(0.35_0.05_242)]">
-                                  {index + 1}
-                                </span>
-                                <p className="text-sm font-medium text-[oklch(0.29_0.04_246)]">{action.title}</p>
-                                <Badge variant="outline" className="text-[11px]">
-                                  {action.actionType}
-                                </Badge>
-                              </div>
-                              <p className="whitespace-pre-wrap text-xs leading-6 text-[oklch(0.39_0.03_242)]">{action.content}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="rounded-2xl border border-dashed border-[oklch(0.84_0.03_242)] bg-[oklch(0.98_0.02_238)] p-10 text-center text-sm text-[oklch(0.44_0.03_242)]">
-                        还没有 Agent 轨迹。执行步骤后，这里会展示“计划、草稿、审查、定稿”全过程。
-                      </div>
-                    )}
-                  </TabsContent>
-                </Tabs>
-              </CardContent>
-            </Card>
-          </section>
-
-          <aside className="space-y-4">
-            <Card className="border-[oklch(0.84_0.03_242)] bg-white/88 shadow-sm">
-              <CardHeader>
-                <CardTitle className="text-base text-[oklch(0.27_0.04_246)]">操作台</CardTitle>
-                <CardDescription>先运行，再确认；不满意可以继续对话打磨。</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {workflowCompleted ? (
-                  <div className="rounded-xl border border-emerald-600/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700">
-                    全流程已完成，可回看任意步骤结果与 Agent 轨迹。
-                  </div>
-                ) : (
-                  <>
-                    <Button
-                      onClick={handleExecuteStep}
-                      disabled={isExecuting || selectedAheadOfCurrent}
-                      className="w-full bg-[linear-gradient(135deg,oklch(0.56_0.15_236),oklch(0.64_0.16_253))] text-white hover:brightness-105"
-                    >
-                      {isExecuting ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          运行中...
-                        </>
+                    <div className={`message-body ${showStepOutputQuestionnaire ? "questionnaire-shell" : "prose prose-sm max-w-none"}`}>
+                      {showStepOutputQuestionnaire ? (
+                        renderQuestionnaireCard()
                       ) : (
-                        <>
-                          <Play className="mr-2 h-4 w-4" />
-                          {selectedStep?.status === "completed" ? "重跑该步骤" : "运行 Agent"}
-                        </>
+                        <Streamdown>{normalizeMarkdownContent(String(activeStep.output.text))}</Streamdown>
                       )}
-                    </Button>
-
-                    <Button
-                      onClick={handleConfirmCurrentStep}
-                      disabled={!selectedIsCurrent || selectedStep?.status !== "completed"}
-                      variant="outline"
-                      className="w-full border-[oklch(0.84_0.03_242)] bg-white hover:bg-[oklch(0.97_0.02_238)]"
-                    >
-                      确认并进入下一步
-                      <ChevronRight className="ml-2 h-4 w-4" />
-                    </Button>
-
-                    <Button
-                      onClick={handleSkipCurrentStep}
-                      disabled={!selectedIsCurrent}
-                      variant="outline"
-                      className="w-full border-[oklch(0.84_0.03_242)] bg-white hover:bg-[oklch(0.97_0.02_238)]"
-                    >
-                      <SkipForward className="mr-2 h-4 w-4" />
-                      跳过当前步骤
-                    </Button>
-
-                    {selectedAheadOfCurrent && (
-                      <p className="rounded-xl border border-[oklch(0.84_0.03_242)] bg-[oklch(0.98_0.02_238)] px-3 py-2 text-xs text-[oklch(0.42_0.03_242)]">
-                        当前选择的是未来步骤，先完成 Step {currentStepNumber + 1} 才能解锁。
-                      </p>
-                    )}
-                  </>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card className="border-[oklch(0.84_0.03_242)] bg-white/88 shadow-sm">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base text-[oklch(0.27_0.04_246)]">
-                  <GitBranch className="h-4 w-4" />
-                  变更迭代 Agent
-                </CardTitle>
-                <CardDescription>输入优化/新增诉求，Agent 自动判断应从哪一步继续并分析影响范围。</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <Textarea
-                  value={changeRequest}
-                  onChange={(event) => setChangeRequest(event.target.value)}
-                  placeholder="例如：在不改核心流程的前提下，新增企业级权限模型和审批链路。"
-                  className="min-h-[110px] border-[oklch(0.84_0.03_242)] bg-white"
-                />
-                <Button
-                  onClick={handleAnalyzeChangeRequest}
-                  disabled={analyzeChangeMutation.isPending || !changeRequest.trim()}
-                  className="w-full bg-[linear-gradient(135deg,oklch(0.56_0.15_236),oklch(0.64_0.16_253))] text-white"
-                >
-                  {analyzeChangeMutation.isPending ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      分析中...
-                    </>
-                  ) : (
-                    <>
-                      <WandSparkles className="mr-2 h-4 w-4" />
-                      分析变更影响
-                    </>
-                  )}
-                </Button>
-
-                {changeAnalysis ? (
-                  <div className="space-y-2 rounded-xl border border-[oklch(0.84_0.03_242)] bg-[oklch(0.98_0.02_238)] p-3">
-                    <p className="text-sm font-medium text-[oklch(0.28_0.04_246)]">{changeAnalysis.summary}</p>
-                    <p className="text-xs text-[oklch(0.42_0.03_242)]">{changeAnalysis.reason}</p>
-                    <div className="flex flex-wrap gap-2">
-                      <Badge variant="outline" className="bg-white text-[11px]">
-                        起步步骤: Step {changeAnalysis.recommendedStartStep + 1}
-                      </Badge>
-                      <Badge variant="outline" className="bg-white text-[11px]">
-                        意图: {changeAnalysis.intentType}
-                      </Badge>
                     </div>
-                    <div className="text-xs text-[oklch(0.42_0.03_242)]">
-                      影响步骤：
-                      {changeAnalysis.impactedSteps.map((step) => (
-                        <span key={step} className="ml-1 inline-flex rounded-full border border-[oklch(0.82_0.03_242)] bg-white px-2 py-0.5">
-                          Step {step + 1}
-                        </span>
-                      ))}
-                    </div>
-                    {changeAnalysis.conflicts.length > 0 ? (
-                      <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-2 text-xs text-amber-700">
-                        冲突提示：{changeAnalysis.conflicts[0]}
-                      </div>
-                    ) : null}
-                    <Button
-                      onClick={handleApplyChangePlan}
-                      disabled={applyChangeMutation.isPending}
-                      variant="outline"
-                      className="w-full border-[oklch(0.82_0.06_242)] bg-white"
-                    >
-                      {applyChangeMutation.isPending ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          应用中...
-                        </>
-                      ) : (
-                        <>
-                          <RefreshCw className="mr-2 h-4 w-4" />
-                          从建议步骤继续迭代
-                        </>
-                      )}
-                    </Button>
                   </div>
                 ) : null}
-              </CardContent>
-            </Card>
 
-            <Card className="border-[oklch(0.84_0.03_242)] bg-white/88 shadow-sm">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base text-[oklch(0.27_0.04_246)]">
-                  <FileText className="h-4 w-4" />
-                  原始需求
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="max-h-[220px] overflow-auto whitespace-pre-wrap text-sm leading-6 text-[oklch(0.39_0.03_242)]">
-                  {project.rawRequirement}
-                </p>
-              </CardContent>
-            </Card>
-          </aside>
+                {inlineArtifacts.map((artifact) => (
+                  <div
+                    key={artifact.id}
+                    className="asset-card-inline"
+                    role="button"
+                    tabIndex={0}
+                    data-asset={artifact.id}
+                    onClick={() => {
+                      openAssetPreview({ kind: "artifact", id: artifact.id });
+                      setAssetPanelCollapsed(false);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        openAssetPreview({ kind: "artifact", id: artifact.id });
+                        setAssetPanelCollapsed(false);
+                      }
+                    }}
+                  >
+                    <div className="asset-icon doc">📄</div>
+                    <div className="asset-card-info">
+                      <div className="asset-card-name">{artifact.title}</div>
+                      <div className="asset-card-meta">
+                        {artifact.artifactType} · {formatDate(artifact.createdAt)}
+                      </div>
+                    </div>
+                    <span className="asset-card-arrow">→</span>
+                  </div>
+                ))}
+
+                {conversation && conversation.length > 0 ? (
+                  conversation.map((message) => {
+                    const isQuestionnaireMessage = message.role === "assistant"
+                      && questionnaireMessageId === message.id;
+
+                    return (
+                      <div key={message.id} className={`message ${message.role === "user" ? "user" : "agent"}`}>
+                        <div className="message-header">
+                          <div className={`message-avatar ${message.role === "user" ? "user" : "agent"}`}>
+                            {message.role === "user" ? "你" : "P"}
+                          </div>
+                          <span className="message-sender">{message.role === "user" ? "你" : "ProductFlow"}</span>
+                          <span className="message-time">{formatDate(message.createdAt)}</span>
+                        </div>
+                        {message.role === "assistant" ? (
+                          <div className={`message-body ${isQuestionnaireMessage ? "questionnaire-shell" : "prose prose-sm max-w-none"}`}>
+                            {isQuestionnaireMessage ? (
+                              renderQuestionnaireCard()
+                            ) : (
+                              <Streamdown>{normalizeMarkdownContent(message.content)}</Streamdown>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="message-body">
+                            <p>{message.content}</p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="message agent">
+                    <div className="message-header">
+                      <div className="message-avatar agent">P</div>
+                      <span className="message-sender">ProductFlow</span>
+                    </div>
+                    <div className="message-body">
+                      <p>还没有对话记录。先输入你的需求或修改意见开始当前步骤。</p>
+                    </div>
+                  </div>
+                )}
+
+                {isExecuting ? (
+                  <div className="thinking">
+                    <div className="thinking-dots">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                    <span className="thinking-text">正在思考与更新中...</span>
+                  </div>
+                ) : null}
+              </section>
+            </div>
+          </div>
+
+          <div className="input-area">
+            <div className="input-container">
+              <textarea
+                className="input-box"
+                value={userMessage}
+                onChange={(event) => setUserMessage(event.target.value)}
+                onKeyDown={handleMessageKeyDown}
+                placeholder={
+                  activeStepNumber === 0 && !project.rawRequirement.trim()
+                    ? "先输入原始需求，例如：我要做一个..."
+                    : "输入你的想法或修改意见..."
+                }
+                rows={5}
+              />
+              <div className="input-actions">
+                <button
+                  className="input-btn"
+                  title="附件"
+                  type="button"
+                  onClick={() => openUploadDialog("project")}
+                  disabled={uploadAssetMutation.isPending}
+                >
+                  <Paperclip className="h-4 w-4" />
+                </button>
+                <button
+                  className="input-btn send"
+                  title="发送"
+                  type="button"
+                  onClick={() => {
+                    void handleSendMessage();
+                  }}
+                  disabled={isExecuting}
+                >
+                  <Send className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+            <div className="input-hint">Enter 发送 · Shift+Enter 换行</div>
+          </div>
         </div>
-      </main>
+
+        <aside className={`asset-panel ${assetPanelCollapsed ? "collapsed" : ""}`}>
+          <div className="asset-panel-header">
+            <span className="asset-panel-title">项目资产</span>
+            <button className="asset-panel-close" onClick={() => setAssetPanelCollapsed(true)}>
+              ×
+            </button>
+          </div>
+          <div className="asset-panel-content">
+            <div className="asset-group">
+              <div className="asset-group-label">Agent 输出文档</div>
+              {visibleArtifacts.length > 0 ? (
+                visibleArtifacts.map((artifact) => (
+                  <div
+                    key={artifact.id}
+                    className={`asset-item ${previewTarget?.kind === "artifact" && previewTarget.id === artifact.id ? "active" : ""}`}
+                    onClick={() => openAssetPreview({ kind: "artifact", id: artifact.id })}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") openAssetPreview({ kind: "artifact", id: artifact.id });
+                    }}
+                  >
+                    <div className="asset-item-icon" style={{ background: "#eef2ff", color: "#4f46e5" }}>📄</div>
+                    <div className="asset-item-info">
+                      <div className="asset-item-name">{artifact.title}</div>
+                      <div className="asset-item-detail">{artifact.artifactType} · {formatDate(artifact.createdAt)}</div>
+                    </div>
+                    <span className="asset-item-badge">最新</span>
+                  </div>
+                ))
+              ) : (
+                <div className="asset-item-detail">当前步骤还没有可展示资产。</div>
+              )}
+            </div>
+
+            <div className="asset-group">
+              <div className="asset-group-label">用户上传</div>
+              {uploadedAssets.length > 0 ? (
+                uploadedAssets.map((asset) => (
+                  <div
+                    key={asset.id}
+                    className={`asset-item ${previewTarget?.kind === "upload" && previewTarget.id === asset.id ? "active" : ""}`}
+                    onClick={() => openAssetPreview({ kind: "upload", id: asset.id })}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") openAssetPreview({ kind: "upload", id: asset.id });
+                    }}
+                  >
+                    <div className="asset-item-icon" style={{ background: "#f3f4f6", color: "#6b7280" }}>📎</div>
+                    <div className="asset-item-info">
+                      <div className="asset-item-name">{asset.fileName}</div>
+                      <div className="asset-item-detail">
+                        {asset.scope} · {typeof asset.fileSize === "number" ? `${(asset.fileSize / 1024).toFixed(1)} KB` : "大小未知"}
+                      </div>
+                    </div>
+                    <span className="asset-item-badge">资料</span>
+                  </div>
+                ))
+              ) : (
+                <div className="asset-item-detail">暂未上传资料。</div>
+              )}
+            </div>
+
+          </div>
+        </aside>
+      </div>
+
+      <Dialog open={assetPreviewModalOpen} onOpenChange={setAssetPreviewModalOpen}>
+        <DialogContent className="pf-asset-preview-dialog sm:max-w-4xl">
+          {previewArtifact ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>{previewArtifact.title}</DialogTitle>
+                <DialogDescription>
+                  {previewArtifact.artifactType} · {formatDate(previewArtifact.createdAt)}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="pf-asset-preview-markdown prose prose-sm max-w-none">
+                <Streamdown>{normalizeMarkdownContent(String(previewArtifact.content || ""))}</Streamdown>
+              </div>
+            </>
+          ) : previewUpload ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>{previewUpload.fileName}</DialogTitle>
+                <DialogDescription>
+                  {previewUpload.scope} · {formatDate(previewUpload.createdAt)}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="pf-asset-preview-pane">
+                {previewUpload.url && isImageMime(previewUpload.mimeType) ? (
+                  <img
+                    src={previewUpload.url}
+                    alt={previewUpload.fileName}
+                    className="pf-asset-preview-image"
+                  />
+                ) : null}
+
+                {previewUpload.url && isPdfMime(previewUpload.mimeType) ? (
+                  <iframe
+                    src={previewUpload.url}
+                    title={previewUpload.fileName}
+                    className="pf-asset-preview-iframe"
+                  />
+                ) : null}
+
+                {!previewUpload.url ||
+                (!isImageMime(previewUpload.mimeType) && !isPdfMime(previewUpload.mimeType)) ? (
+                  <div className="pf-asset-preview-meta">
+                    <p>类型：{previewUpload.assetType}</p>
+                    <p>MIME：{previewUpload.mimeType}</p>
+                    <p>
+                      大小：
+                      {typeof previewUpload.fileSize === "number"
+                        ? `${(previewUpload.fileSize / 1024).toFixed(1)} KB`
+                        : "未知"}
+                    </p>
+                    <p>
+                      作用域：{previewUpload.scope}
+                      {typeof previewUpload.stepNumber === "number"
+                        ? ` · Step ${previewUpload.stepNumber + 1}`
+                        : ""}
+                    </p>
+                    {previewUpload.url ? (
+                      <a href={previewUpload.url} target="_blank" rel="noreferrer" className="pf-inline-link">
+                        在新窗口打开原文件
+                      </a>
+                    ) : (
+                      <p>当前文件暂不支持站内预览。</p>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle>预览不可用</DialogTitle>
+                <DialogDescription>请先从资产列表选择一个文档或上传文件。</DialogDescription>
+              </DialogHeader>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -9,9 +9,11 @@ import {
   type AgentRun,
   type ConversationMessage,
   type Project,
+  type UserAiSetting,
   type WorkflowArtifact,
   type WorkflowAsset,
   type WorkflowStep,
+  userAiSettings,
   workflowArtifacts,
   workflowAssets,
   workflowSteps,
@@ -102,6 +104,16 @@ export async function updateProjectStep(projectId: number, currentStep: number, 
   await db.update(projects).set({ currentStep, status, updatedAt: new Date() }).where(eq(projects.id, projectId));
 }
 
+export async function updateProjectRawRequirement(projectId: number, rawRequirement: string): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db
+    .update(projects)
+    .set({ rawRequirement, updatedAt: new Date() })
+    .where(eq(projects.id, projectId));
+}
+
 export async function deleteProject(projectId: number, userId: number): Promise<void> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
@@ -117,6 +129,66 @@ export async function deleteProject(projectId: number, userId: number): Promise<
   
   // 再删除项目
   await db.delete(projects).where(and(eq(projects.id, projectId), eq(projects.userId, userId)));
+}
+
+/**
+ * User AI settings related DB operations
+ */
+export async function getUserAiSettingByUserId(userId: number): Promise<UserAiSetting | null> {
+  const db = await getDb();
+  if (!db) return null;
+
+  const [setting] = await db
+    .select()
+    .from(userAiSettings)
+    .where(eq(userAiSettings.userId, userId))
+    .limit(1);
+
+  return setting ?? null;
+}
+
+export async function upsertUserAiSetting(data: {
+  userId: number;
+  providerId: string;
+  baseUrl: string;
+  model: string;
+  apiKeyEncrypted?: string | null;
+  enabled: boolean;
+  metadata?: Record<string, any>;
+}): Promise<UserAiSetting> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db
+    .insert(userAiSettings)
+    .values({
+      userId: data.userId,
+      providerId: data.providerId,
+      baseUrl: data.baseUrl,
+      model: data.model,
+      apiKeyEncrypted: data.apiKeyEncrypted ?? null,
+      enabled: data.enabled ? 1 : 0,
+      metadata: data.metadata,
+    })
+    .onDuplicateKeyUpdate({
+      set: {
+        providerId: data.providerId,
+        baseUrl: data.baseUrl,
+        model: data.model,
+        apiKeyEncrypted: data.apiKeyEncrypted ?? null,
+        enabled: data.enabled ? 1 : 0,
+        metadata: data.metadata,
+        updatedAt: new Date(),
+      },
+    });
+
+  const [created] = await db
+    .select()
+    .from(userAiSettings)
+    .where(eq(userAiSettings.userId, data.userId))
+    .limit(1);
+  if (!created) throw new Error("Failed to save user AI settings");
+  return created;
 }
 
 /**

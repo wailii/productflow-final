@@ -12,7 +12,7 @@ import {
   startAgentRun,
   updateAgentRunProgress,
 } from "./db-helpers";
-import type { MessageContent } from "./_core/llm";
+import type { LLMRuntimeConfig, MessageContent } from "./_core/llm";
 import { getLocalStorageDirectory } from "./storage";
 
 /**
@@ -26,6 +26,7 @@ import { getLocalStorageDirectory } from "./storage";
 const AGENT_STRATEGY = "agent-v2";
 const AGENT_MAX_ITERATIONS = ENV.agentMaxIterations;
 const AGENT_PASS_SCORE = ENV.agentPassScore;
+type AgentLlmConfig = Pick<LLMRuntimeConfig, "apiUrl" | "apiKey" | "model" | "extraHeaders">;
 
 // 定义每个步骤的 Prompt 模板
 const STEP_PROMPTS = {
@@ -539,9 +540,14 @@ type AgentMessage = {
 
 async function invokeText(
   messages: AgentMessage[],
-  maxTokens?: number
+  maxTokens?: number,
+  runtimeConfig?: AgentLlmConfig
 ) {
-  const response = await invokeLLM({ messages, maxTokens: maxTokens ?? 6000 });
+  const response = await invokeLLM({
+    messages,
+    maxTokens: maxTokens ?? 6000,
+    runtimeConfig,
+  });
   return readChoiceText(response.choices[0]?.message?.content).trim();
 }
 
@@ -549,12 +555,14 @@ async function invokeStructured<T>(
   messages: AgentMessage[],
   schemaName: string,
   schema: Record<string, unknown>,
-  maxTokens?: number
+  maxTokens?: number,
+  runtimeConfig?: AgentLlmConfig
 ): Promise<T> {
   try {
     const response = await invokeLLM({
       messages,
       maxTokens: maxTokens ?? 2200,
+      runtimeConfig,
       responseFormat: {
         type: "json_schema",
         json_schema: {
@@ -575,7 +583,7 @@ async function invokeStructured<T>(
         role: "user",
         content: "请仅输出合法 JSON，不要输出 Markdown 或解释。",
       },
-    ], maxTokens ?? 2200);
+    ], maxTokens ?? 2200, runtimeConfig);
     return parseJsonObject<T>(fallbackText);
   }
 }
@@ -717,6 +725,7 @@ async function generatePlan(input: {
   assetSummary: string;
   assetTextHints: string[];
   assetParts: MessageContent[];
+  runtimeConfig?: AgentLlmConfig;
 }) {
   const schema = {
     type: "object",
@@ -762,7 +771,8 @@ async function generatePlan(input: {
     ],
     "agent_plan",
     schema,
-    2200
+    2200,
+    input.runtimeConfig
   );
 
   return normalizePlan(result);
@@ -780,6 +790,7 @@ async function generateDraft(input: {
   historySummary: string;
   iteration: number;
   lastReview: AgentReview | null;
+  runtimeConfig?: AgentLlmConfig;
 }) {
   const reviewHints = input.lastReview
     ? `上一轮审查结论:\n${formatReview(input.lastReview)}`
@@ -815,13 +826,14 @@ async function generateDraft(input: {
         ...input.assetParts,
       ],
     },
-  ], 6500);
+  ], 6500, input.runtimeConfig);
 }
 
 async function reviewDraft(input: {
   taskPrompt: string;
   draft: string;
   plan: AgentPlan;
+  runtimeConfig?: AgentLlmConfig;
 }) {
   const schema = {
     type: "object",
@@ -867,7 +879,8 @@ async function reviewDraft(input: {
     ],
     "agent_review",
     schema,
-    2200
+    2200,
+    input.runtimeConfig
   );
 
   return normalizeReview(result);
@@ -883,6 +896,7 @@ async function finalizeOutput(input: {
   assetSummary: string;
   assetTextHints: string[];
   assetParts: MessageContent[];
+  runtimeConfig?: AgentLlmConfig;
 }) {
   const reviewBlock = input.review
     ? `审查结果:\n${formatReview(input.review)}`
@@ -913,7 +927,7 @@ async function finalizeOutput(input: {
         ...input.assetParts,
       ],
     },
-  ], 6500);
+  ], 6500, input.runtimeConfig);
 }
 
 /**
@@ -923,7 +937,8 @@ export async function executeWorkflowStep(
   projectId: number,
   stepNumber: number,
   input: Record<string, any>,
-  conversationHistory?: Array<{ role: string; content: string }>
+  conversationHistory?: Array<{ role: string; content: string }>,
+  runtimeConfig?: AgentLlmConfig
 ): Promise<{ success: boolean; output?: Record<string, any>; error?: string }> {
   const stepConfig = STEP_PROMPTS[stepNumber as keyof typeof STEP_PROMPTS];
   if (!stepConfig) {
@@ -1017,6 +1032,7 @@ export async function executeWorkflowStep(
       assetSummary: assetsSummary,
       assetTextHints,
       assetParts,
+      runtimeConfig,
     });
 
     await appendAgentAction({
@@ -1083,6 +1099,7 @@ export async function executeWorkflowStep(
         historySummary,
         iteration: round,
         lastReview,
+        runtimeConfig,
       });
 
       await appendAgentAction({
@@ -1119,6 +1136,7 @@ export async function executeWorkflowStep(
         taskPrompt: userPrompt,
         draft: draftText,
         plan,
+        runtimeConfig,
       });
 
       bestScore = Math.max(bestScore, lastReview.score);
@@ -1183,6 +1201,7 @@ export async function executeWorkflowStep(
       assetSummary: assetsSummary,
       assetTextHints,
       assetParts,
+      runtimeConfig,
     });
 
     await appendAgentAction({
@@ -1324,6 +1343,82 @@ export async function executeWorkflowStep(
   }
 }
 
+/**
+ * 在同一步骤内进行快速续聊改写（不重跑完整 Agent 状态机）
+ */
+export async function continueWorkflowStepConversation(
+  projectId: number,
+  stepNumber: number,
+  input: Record<string, any>,
+  userMessage: string,
+  conversationHistory?: Array<{ role: string; content: string }>,
+  runtimeConfig?: AgentLlmConfig
+): Promise<{ success: boolean; output?: Record<string, any>; error?: string }> {
+  const stepConfig = STEP_PROMPTS[stepNumber as keyof typeof STEP_PROMPTS];
+  if (!stepConfig) {
+    return { success: false, error: `Invalid step number: ${stepNumber}` };
+  }
+
+  try {
+    const inputText = summarizeInput(input);
+    const historySummary = summarizeConversation(conversationHistory);
+    const currentText =
+      typeof input?.text === "string" && input.text.trim().length > 0
+        ? input.text.trim()
+        : "";
+
+    const responseText = await invokeText(
+      [
+        {
+          role: "system",
+          content: [
+            stepConfig.systemPrompt,
+            "你正在同一步骤中根据用户新反馈进行快速迭代。",
+            "请直接输出更新后的完整文档正文，不要输出过程说明、不要输出额外前后缀。",
+          ].join("\n\n"),
+        },
+        {
+          role: "user",
+          content: [
+            `当前步骤：Step ${stepNumber + 1} ${stepConfig.name}`,
+            `步骤输入摘要：\n${inputText}`,
+            currentText ? `当前文档：\n${currentText}` : "",
+            historySummary ? `最近对话摘要：\n${historySummary}` : "",
+            `用户最新消息：\n${userMessage.trim()}`,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
+      ],
+      3600,
+      runtimeConfig
+    );
+
+    const text = responseText || currentText || "（模型未返回内容）";
+    const output = {
+      text,
+      timestamp: new Date().toISOString(),
+      agent: {
+        strategy: "conversation-fast",
+        mode: "chat_refine",
+        stepName: stepConfig.name,
+      },
+    };
+
+    return {
+      success: true,
+      output,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error(`Error continuing conversation on step ${stepNumber}:`, error);
+    return {
+      success: false,
+      error: message,
+    };
+  }
+}
+
 export async function analyzeChangeImpact(params: {
   projectId: number;
   projectTitle: string;
@@ -1334,7 +1429,7 @@ export async function analyzeChangeImpact(params: {
     status: "pending" | "processing" | "completed" | "error";
     output: Record<string, any> | null;
   }>;
-}): Promise<ChangeImpactAnalysis> {
+}, runtimeConfig?: AgentLlmConfig): Promise<ChangeImpactAnalysis> {
   const stepSummary = summarizeAllStepOutputs(
     params.steps.map((step) => ({
       stepNumber: step.stepNumber,
@@ -1418,7 +1513,8 @@ export async function analyzeChangeImpact(params: {
     ],
     "change_impact_analysis",
     schema,
-    2200
+    2200,
+    runtimeConfig
   );
 
   return normalizeChangeAnalysis(raw);
