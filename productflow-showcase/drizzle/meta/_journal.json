@@ -1,0 +1,48 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1771257300883,
+      "tag": "0000_robust_polaris",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1771257372396,
+      "tag": "0001_dusty_spyke",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1771259019972,
+      "tag": "0002_outgoing_captain_britain",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1771263378600,
+      "tag": "0003_left_shiver_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1771269442551,
+      "tag": "0004_sweet_quicksilver",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1771297134751,
+      "tag": "0005_chief_white_queen",
+      "breakpoints": true
+    }
+  ]
+}
