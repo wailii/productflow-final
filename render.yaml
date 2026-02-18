@@ -1,4 +1,21 @@
 services:
+  - type: pserv
+    name: productflow-mysql
+    runtime: image
+    image: mysql:8.0
+    plan: free
+    envVars:
+      - key: PORT
+        value: "3306"
+      - key: MYSQL_DATABASE
+        value: productflow
+      - key: MYSQL_USER
+        value: productflow
+      - key: MYSQL_PASSWORD
+        value: pf_mysql_change_me
+      - key: MYSQL_ROOT_PASSWORD
+        value: pf_root_change_me
+
   - type: web
     name: productflow-showcase
     runtime: node
@@ -17,24 +34,16 @@ services:
       - key: AGENT_PASS_SCORE
         value: "85"
       - key: DATABASE_URL
-        sync: false
+        value: mysql://productflow:pf_mysql_change_me@productflow-mysql:3306/productflow
       - key: JWT_SECRET
-        sync: false
+        generateValue: true
       - key: VITE_APP_ID
-        sync: false
+        value: local-auth
       - key: OAUTH_SERVER_URL
-        sync: false
+        value: https://example.com
       - key: VITE_OAUTH_PORTAL_URL
-        sync: false
-      - key: OWNER_OPEN_ID
-        sync: false
-      - key: OWNER_NAME
-        sync: false
+        value: https://example.com
       - key: BUILT_IN_FORGE_API_URL
-        sync: false
+        value: https://api.moonshot.cn/v1
       - key: BUILT_IN_FORGE_API_KEY
-        sync: false
-      - key: VITE_FRONTEND_FORGE_API_URL
-        sync: false
-      - key: VITE_FRONTEND_FORGE_API_KEY
-        sync: false
+        value: placeholder
