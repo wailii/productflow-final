@@ -22,7 +22,7 @@ services:
     plan: free
     rootDir: productflow-showcase
     buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
-    startCommand: pnpm start
+    startCommand: pnpm drizzle-kit migrate && pnpm start
     healthCheckPath: /
     envVars:
       - key: NODE_ENV
@@ -33,8 +33,28 @@ services:
         value: "3"
       - key: AGENT_PASS_SCORE
         value: "85"
-      - key: DATABASE_URL
-        value: mysql://productflow:pf_mysql_change_me@productflow-mysql:3306/productflow
+      - key: DB_HOST
+        fromService:
+          type: pserv
+          name: productflow-mysql
+          property: host
+      - key: DB_PORT
+        value: "3306"
+      - key: DB_USER
+        fromService:
+          type: pserv
+          name: productflow-mysql
+          envVarKey: MYSQL_USER
+      - key: DB_PASSWORD
+        fromService:
+          type: pserv
+          name: productflow-mysql
+          envVarKey: MYSQL_PASSWORD
+      - key: DB_NAME
+        fromService:
+          type: pserv
+          name: productflow-mysql
+          envVarKey: MYSQL_DATABASE
       - key: JWT_SECRET
         generateValue: true
       - key: VITE_APP_ID

@@ -1,5 +1,11 @@
 const isProduction = process.env.NODE_ENV === "production";
 
+const PLACEHOLDER_DATABASE_URLS = new Set([
+  "mysql://user:pass@host:3306/dbname",
+  "mysql://username:password@host:3306/database",
+  "mysql://productflow:change-me@127.0.0.1:3306/productflow",
+]);
+
 const parseIntInRange = (
   value: string | undefined,
   defaultValue: number,
@@ -22,8 +28,38 @@ const requireInProduction = (
   }
 };
 
+const buildDatabaseUrlFromParts = (): string => {
+  const host = process.env.DB_HOST?.trim();
+  const port = process.env.DB_PORT?.trim() || "3306";
+  const user = process.env.DB_USER?.trim();
+  const password = process.env.DB_PASSWORD ?? "";
+  const database = process.env.DB_NAME?.trim();
+
+  if (!host || !user || !database) return "";
+
+  const encodedUser = encodeURIComponent(user);
+  const encodedPassword = encodeURIComponent(password);
+  const encodedDatabase = encodeURIComponent(database);
+
+  return `mysql://${encodedUser}:${encodedPassword}@${host}:${port}/${encodedDatabase}`;
+};
+
+const resolveDatabaseUrl = (): string => {
+  const raw = process.env.DATABASE_URL?.trim() ?? "";
+  if (raw && !PLACEHOLDER_DATABASE_URLS.has(raw.toLowerCase())) {
+    return raw;
+  }
+  return buildDatabaseUrlFromParts();
+};
+
+const resolvedDatabaseUrl = resolveDatabaseUrl();
+
 const missingInProduction: string[] = [];
-requireInProduction("DATABASE_URL", process.env.DATABASE_URL, missingInProduction);
+requireInProduction(
+  "DATABASE_URL (or DB_HOST + DB_PORT + DB_USER + DB_PASSWORD + DB_NAME)",
+  resolvedDatabaseUrl,
+  missingInProduction
+);
 requireInProduction("JWT_SECRET", process.env.JWT_SECRET, missingInProduction);
 if (
   isProduction &&
@@ -50,7 +86,7 @@ export const ENV = {
   cookieSecret:
     process.env.JWT_SECRET ??
     (process.env.NODE_ENV === "development" ? "local-dev-secret" : ""),
-  databaseUrl: process.env.DATABASE_URL ?? "",
+  databaseUrl: resolvedDatabaseUrl,
   oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
   ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
   isProduction,
