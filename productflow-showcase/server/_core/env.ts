@@ -4,6 +4,7 @@ const PLACEHOLDER_DATABASE_URLS = new Set([
   "mysql://user:pass@host:3306/dbname",
   "mysql://username:password@host:3306/database",
   "mysql://productflow:change-me@127.0.0.1:3306/productflow",
+  "mysql://productflow:pf_mysql_change_me@productflow-mysql:3306/productflow",
 ]);
 
 const parseIntInRange = (

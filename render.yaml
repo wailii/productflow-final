@@ -5,7 +5,7 @@ services:
     plan: free
     rootDir: productflow-showcase
     buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
-    startCommand: pnpm drizzle-kit migrate && pnpm start
+    startCommand: pnpm start
     healthCheckPath: /
     envVars:
       - key: NODE_ENV

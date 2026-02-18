@@ -28,6 +28,45 @@ function buildLocalOpenId(email: string) {
   return `local_${digest}`;
 }
 
+function normalizeLocalAuthError(error: unknown): { status: number; message: string } {
+  const rawMessage = String(
+    (error as { message?: unknown })?.message ??
+      (error as { cause?: { message?: unknown } })?.cause?.message ??
+      ""
+  ).toLowerCase();
+
+  if (
+    rawMessage.includes("enotfound") ||
+    rawMessage.includes("econnrefused") ||
+    rawMessage.includes("getaddrinfo") ||
+    rawMessage.includes("can't connect")
+  ) {
+    return {
+      status: 503,
+      message: "数据库连接失败：请把 DATABASE_URL 改成可访问的外部免费 MySQL 连接串。",
+    };
+  }
+
+  if (rawMessage.includes("access denied")) {
+    return {
+      status: 503,
+      message: "数据库账号或密码错误：请检查 DATABASE_URL 中的用户名和密码。",
+    };
+  }
+
+  if (rawMessage.includes("doesn't exist") || rawMessage.includes("er_no_such_table")) {
+    return {
+      status: 503,
+      message: "数据库已连接但表未初始化，请稍后重试一次。",
+    };
+  }
+
+  return {
+    status: 500,
+    message: "Register failed",
+  };
+}
+
 async function issueSession(
   req: Request,
   res: Response,
@@ -64,7 +103,9 @@ export function registerLocalAuthRoutes(app: Express) {
     try {
       const database = await db.getDb();
       if (!database) {
-        res.status(503).json({ error: "Database not available" });
+        res.status(503).json({
+          error: "数据库未配置：请先在 Render 环境变量里填写 DATABASE_URL（外部免费 MySQL）。",
+        });
         return;
       }
 
@@ -108,7 +149,8 @@ export function registerLocalAuthRoutes(app: Express) {
       });
     } catch (error) {
       console.error("[LocalAuth] Register failed", error);
-      res.status(500).json({ error: "Register failed" });
+      const normalized = normalizeLocalAuthError(error);
+      res.status(normalized.status).json({ error: normalized.message });
     }
   });
 
@@ -130,7 +172,9 @@ export function registerLocalAuthRoutes(app: Express) {
     try {
       const database = await db.getDb();
       if (!database) {
-        res.status(503).json({ error: "Database not available" });
+        res.status(503).json({
+          error: "数据库未配置：请先在 Render 环境变量里填写 DATABASE_URL（外部免费 MySQL）。",
+        });
         return;
       }
 
@@ -169,7 +213,8 @@ export function registerLocalAuthRoutes(app: Express) {
       });
     } catch (error) {
       console.error("[LocalAuth] Login failed", error);
-      res.status(500).json({ error: "Login failed" });
+      const normalized = normalizeLocalAuthError(error);
+      res.status(normalized.status).json({ error: normalized.message });
     }
   });
 }
