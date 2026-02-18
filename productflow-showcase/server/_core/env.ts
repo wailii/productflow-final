@@ -61,11 +61,6 @@ const resolveDatabaseUrl = (): string => {
 const resolvedDatabaseUrl = resolveDatabaseUrl();
 
 const missingInProduction: string[] = [];
-requireInProduction(
-  "DATABASE_URL (or DB_HOST + DB_PORT + DB_USER + DB_PASSWORD + DB_NAME)",
-  resolvedDatabaseUrl,
-  missingInProduction
-);
 requireInProduction("JWT_SECRET", process.env.JWT_SECRET, missingInProduction);
 if (
   isProduction &&

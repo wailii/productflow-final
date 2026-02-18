@@ -19,6 +19,7 @@ import {
   workflowSteps,
 } from "../drizzle/schema";
 import { storageGet } from "./storage";
+import * as localDb from "./local-db";
 
 function isMissingTableError(error: unknown, tableName: string): boolean {
   const message = String(
@@ -39,7 +40,7 @@ function isMissingTableError(error: unknown, tableName: string): boolean {
 
 export async function createProject(userId: number, title: string, rawRequirement: string): Promise<Project> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.createProject(userId, title, rawRequirement);
 
   const [project] = await db.insert(projects).values({
     userId,
@@ -61,7 +62,7 @@ export async function createProjectWithSteps(
   rawRequirement: string
 ): Promise<Project> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.createProjectWithSteps(userId, title, rawRequirement);
 
   const createdProject = await db.transaction(async (tx) => {
     const [project] = await tx
@@ -94,14 +95,14 @@ export async function createProjectWithSteps(
 
 export async function getProjectsByUserId(userId: number): Promise<Project[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) return localDb.getProjectsByUserId(userId);
 
   return db.select().from(projects).where(eq(projects.userId, userId)).orderBy(desc(projects.updatedAt));
 }
 
 export async function getProjectById(projectId: number, userId: number): Promise<Project | null> {
   const db = await getDb();
-  if (!db) return null;
+  if (!db) return localDb.getProjectById(projectId, userId);
 
   const [project] = await db.select().from(projects).where(
     and(eq(projects.id, projectId), eq(projects.userId, userId))
@@ -112,14 +113,14 @@ export async function getProjectById(projectId: number, userId: number): Promise
 
 export async function updateProjectStep(projectId: number, currentStep: number, status: "draft" | "in_progress" | "completed" | "archived"): Promise<void> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.updateProjectStep(projectId, currentStep, status);
 
   await db.update(projects).set({ currentStep, status, updatedAt: new Date() }).where(eq(projects.id, projectId));
 }
 
 export async function updateProjectRawRequirement(projectId: number, rawRequirement: string): Promise<void> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.updateProjectRawRequirement(projectId, rawRequirement);
 
   await db
     .update(projects)
@@ -129,7 +130,7 @@ export async function updateProjectRawRequirement(projectId: number, rawRequirem
 
 export async function deleteProject(projectId: number, userId: number): Promise<void> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.deleteProject(projectId, userId);
 
   await db.delete(workflowAssets).where(eq(workflowAssets.projectId, projectId));
   await db.delete(workflowArtifacts).where(eq(workflowArtifacts.projectId, projectId));
@@ -149,7 +150,7 @@ export async function deleteProject(projectId: number, userId: number): Promise<
  */
 export async function getUserAiSettingByUserId(userId: number): Promise<UserAiSetting | null> {
   const db = await getDb();
-  if (!db) return null;
+  if (!db) return localDb.getUserAiSettingByUserId(userId);
 
   try {
     const [setting] = await db
@@ -180,7 +181,7 @@ export async function upsertUserAiSetting(data: {
   metadata?: Record<string, any>;
 }): Promise<UserAiSetting> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.upsertUserAiSetting(data);
 
   await db
     .insert(userAiSettings)
@@ -220,7 +221,7 @@ export async function upsertUserAiSetting(data: {
 
 export async function createWorkflowStep(projectId: number, stepNumber: number): Promise<WorkflowStep> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.createWorkflowStep(projectId, stepNumber);
 
   const [step] = await db.insert(workflowSteps).values({
     projectId,
@@ -236,14 +237,14 @@ export async function createWorkflowStep(projectId: number, stepNumber: number):
 
 export async function getWorkflowStepsByProjectId(projectId: number): Promise<WorkflowStep[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) return localDb.getWorkflowStepsByProjectId(projectId);
 
   return db.select().from(workflowSteps).where(eq(workflowSteps.projectId, projectId)).orderBy(workflowSteps.stepNumber);
 }
 
 export async function getWorkflowStep(projectId: number, stepNumber: number): Promise<WorkflowStep | null> {
   const db = await getDb();
-  if (!db) return null;
+  if (!db) return localDb.getWorkflowStep(projectId, stepNumber);
 
   const [step] = await db.select().from(workflowSteps).where(
     and(eq(workflowSteps.projectId, projectId), eq(workflowSteps.stepNumber, stepNumber))
@@ -263,14 +264,14 @@ export async function updateWorkflowStep(
   }
 ): Promise<void> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.updateWorkflowStep(stepId, data);
 
   await db.update(workflowSteps).set({ ...data, updatedAt: new Date() }).where(eq(workflowSteps.id, stepId));
 }
 
 export async function initializeWorkflowSteps(projectId: number): Promise<void> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.initializeWorkflowSteps(projectId);
 
   await db.insert(workflowSteps).values(
     Array.from({ length: 9 }, (_, stepNumber) => ({
@@ -288,7 +289,7 @@ export async function ensureWorkflowStepsByProjectId(projectId: number): Promise
   }
 
   const db = await getDb();
-  if (!db) return existing;
+  if (!db) return localDb.ensureWorkflowStepsByProjectId(projectId);
 
   const existingStepNumbers = new Set(existing.map((item) => item.stepNumber));
   const missingSteps = Array.from({ length: 9 }, (_, stepNumber) => stepNumber).filter(
@@ -328,7 +329,7 @@ export async function addConversationMessage(
   content: string
 ): Promise<ConversationMessage> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.addConversationMessage(projectId, stepNumber, role, content);
 
   const [message] = await db.insert(conversationHistory).values({
     projectId,
@@ -345,7 +346,7 @@ export async function addConversationMessage(
 
 export async function getConversationHistory(projectId: number, stepNumber: number): Promise<ConversationMessage[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) return localDb.getConversationHistory(projectId, stepNumber);
 
   return db.select().from(conversationHistory).where(
     and(eq(conversationHistory.projectId, projectId), eq(conversationHistory.stepNumber, stepNumber))
@@ -354,7 +355,7 @@ export async function getConversationHistory(projectId: number, stepNumber: numb
 
 export async function getProjectConversationHistory(projectId: number): Promise<ConversationMessage[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) return localDb.getProjectConversationHistory(projectId);
 
   return db
     .select()
@@ -365,7 +366,7 @@ export async function getProjectConversationHistory(projectId: number): Promise<
 
 export async function clearConversationHistory(projectId: number, stepNumber: number): Promise<void> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.clearConversationHistory(projectId, stepNumber);
 
   await db.delete(conversationHistory).where(
     and(eq(conversationHistory.projectId, projectId), eq(conversationHistory.stepNumber, stepNumber))
@@ -390,7 +391,7 @@ export async function startAgentRun(
   strategy: string = "agent-v2"
 ): Promise<AgentRun> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.startAgentRun(projectId, stepNumber, strategy);
 
   const [inserted] = await db
     .insert(agentRuns)
@@ -419,7 +420,7 @@ export async function updateAgentRunProgress(data: {
   stateSnapshot?: Record<string, any>;
 }): Promise<void> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.updateAgentRunProgress(data);
 
   await db
     .update(agentRuns)
@@ -443,7 +444,7 @@ export async function appendAgentAction(data: {
   metadata?: Record<string, any>;
 }): Promise<AgentAction> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.appendAgentAction(data);
 
   const [inserted] = await db
     .insert(agentActions)
@@ -476,7 +477,7 @@ export async function finishAgentRun(data: {
   errorMessage?: string;
 }): Promise<void> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.finishAgentRun(data);
 
   await db
     .update(agentRuns)
@@ -499,7 +500,7 @@ export async function getLatestAgentRunByStep(
   stepNumber: number
 ): Promise<AgentRun | null> {
   const db = await getDb();
-  if (!db) return null;
+  if (!db) return localDb.getLatestAgentRunByStep(projectId, stepNumber);
 
   const [run] = await db
     .select()
@@ -514,7 +515,7 @@ export async function getLatestAgentRunByStep(
 
 export async function getAgentActionsByRunId(runId: number): Promise<AgentAction[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) return localDb.getAgentActionsByRunId(runId);
 
   return db
     .select()
@@ -551,7 +552,7 @@ export async function appendWorkflowArtifact(data: {
   payload?: Record<string, any>;
 }): Promise<WorkflowArtifact> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.appendWorkflowArtifact(data);
 
   const [inserted] = await db
     .insert(workflowArtifacts)
@@ -585,7 +586,7 @@ export async function getWorkflowArtifacts(params: {
   limit?: number;
 }): Promise<WorkflowArtifact[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) return localDb.getWorkflowArtifacts(params);
 
   const whereBase =
     typeof params.stepNumber === "number"
@@ -618,7 +619,7 @@ export async function getAgentContextArtifacts(
   limit = 80
 ): Promise<WorkflowArtifact[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) return localDb.getAgentContextArtifacts(projectId, stepNumber, limit);
 
   return db
     .select()
@@ -647,7 +648,7 @@ export async function resetWorkflowFromStep(
   startStep: number
 ): Promise<void> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.resetWorkflowFromStep(projectId, startStep);
 
   await db.transaction(async (tx) => {
     const affectedSteps = await tx
@@ -716,7 +717,7 @@ export async function appendWorkflowAsset(data: {
   note?: string;
 }): Promise<WorkflowAsset> {
   const db = await getDb();
-  if (!db) throw new Error("Database not available");
+  if (!db) return localDb.appendWorkflowAsset(data);
 
   const [inserted] = await db
     .insert(workflowAssets)
@@ -748,7 +749,7 @@ export async function getWorkflowAssets(params: {
   limit?: number;
 }): Promise<WorkflowAsset[]> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) return localDb.getWorkflowAssets(params);
 
   const whereBase =
     typeof params.stepNumber === "number"
@@ -793,7 +794,19 @@ export async function getAgentContextAssetsWithUrls(
   limit = 20
 ): Promise<Array<WorkflowAsset & { url: string | null }>> {
   const db = await getDb();
-  if (!db) return [];
+  if (!db) {
+    const assets = await localDb.getAgentContextAssets(projectId, stepNumber, limit);
+    return Promise.all(
+      assets.map(async (asset) => {
+        try {
+          const resolved = await storageGet(asset.storageKey);
+          return { ...asset, url: resolved.url };
+        } catch {
+          return { ...asset, url: null };
+        }
+      })
+    );
+  }
 
   const assets = await db
     .select()

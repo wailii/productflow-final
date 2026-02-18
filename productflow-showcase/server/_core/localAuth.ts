@@ -43,7 +43,7 @@ function normalizeLocalAuthError(error: unknown): { status: number; message: str
   ) {
     return {
       status: 503,
-      message: "数据库连接失败：请把 DATABASE_URL 改成可访问的外部免费 MySQL 连接串。",
+      message: "数据库暂时不可用，请稍后重试。",
     };
   }
 
@@ -101,14 +101,6 @@ export function registerLocalAuthRoutes(app: Express) {
     const { name, password } = parsed.data;
 
     try {
-      const database = await db.getDb();
-      if (!database) {
-        res.status(503).json({
-          error: "数据库未配置：请先在 Render 环境变量里填写 DATABASE_URL（外部免费 MySQL）。",
-        });
-        return;
-      }
-
       let user = await db.getUserByEmail(normalizedEmail);
       if (user) {
         const existingCredential = await db.getLocalCredentialByUserId(user.id);
@@ -170,14 +162,6 @@ export function registerLocalAuthRoutes(app: Express) {
     const { password } = parsed.data;
 
     try {
-      const database = await db.getDb();
-      if (!database) {
-        res.status(503).json({
-          error: "数据库未配置：请先在 Render 环境变量里填写 DATABASE_URL（外部免费 MySQL）。",
-        });
-        return;
-      }
-
       const user = await db.getUserByEmail(normalizedEmail);
       if (!user) {
         res.status(401).json({ error: "Invalid email or password" });

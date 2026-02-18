@@ -7,7 +7,8 @@ import {
   localCredentials,
   users,
 } from "../drizzle/schema";
-import { ENV } from './_core/env';
+import { ENV } from "./_core/env";
+import * as localDb from "./local-db";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 let _schemaInitPromise: Promise<void> | null = null;
@@ -34,6 +35,30 @@ function getErrorMessage(error: unknown): string {
   const cause = (error as { cause?: { message?: unknown } })?.cause?.message;
   if (typeof cause === "string" && cause.length > 0) return cause;
   return String(error ?? "");
+}
+
+function isDbConnectionError(error: unknown): boolean {
+  const code = getErrorCode(error).toUpperCase();
+  if (
+    code === "ENOTFOUND" ||
+    code === "ECONNREFUSED" ||
+    code === "ETIMEDOUT" ||
+    code === "EHOSTUNREACH" ||
+    code === "PROTOCOL_CONNECTION_LOST"
+  ) {
+    return true;
+  }
+
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    message.includes("enotfound") ||
+    message.includes("econnrefused") ||
+    message.includes("etimedout") ||
+    message.includes("ehostunreach") ||
+    message.includes("can't connect") ||
+    message.includes("getaddrinfo") ||
+    message.includes("connection lost")
+  );
 }
 
 function isIgnorableMigrationError(error: unknown): boolean {
@@ -109,19 +134,50 @@ async function ensureSchemaInitialized(db: ReturnType<typeof drizzle>) {
   await _schemaInitPromise;
 }
 
+async function runWithLocalFallback<T>(
+  taskName: string,
+  operation: (db: ReturnType<typeof drizzle>) => Promise<T>,
+  fallback: () => Promise<T>
+): Promise<T> {
+  const db = await getDb();
+  if (!db) {
+    return fallback();
+  }
+
+  try {
+    return await operation(db);
+  } catch (error) {
+    if (isDbConnectionError(error)) {
+      console.warn(`[Database] ${taskName} failed, fallback to local DB:`, getErrorMessage(error));
+      return fallback();
+    }
+    throw error;
+  }
+}
+
 // Lazily create the drizzle instance so local tooling can run without a DB.
 export async function getDb() {
   if (!_db && ENV.databaseUrl) {
     try {
       _db = drizzle(ENV.databaseUrl);
     } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
+      console.warn("[Database] Failed to initialize client:", error);
       _db = null;
     }
   }
 
   if (_db) {
-    await ensureSchemaInitialized(_db);
+    try {
+      await ensureSchemaInitialized(_db);
+    } catch (error) {
+      if (isDbConnectionError(error)) {
+        console.warn("[Database] Schema init failed, fallback to local DB:", getErrorMessage(error));
+        _db = null;
+        _schemaInitPromise = null;
+      } else {
+        throw error;
+      }
+    }
   }
 
   return _db;
@@ -132,122 +188,124 @@ export async function upsertUser(user: InsertUser): Promise<void> {
     throw new Error("User openId is required for upsert");
   }
 
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot upsert user: database not available");
-    return;
-  }
+  await runWithLocalFallback(
+    "upsertUser",
+    async (db) => {
+      const values: InsertUser = {
+        openId: user.openId,
+      };
+      const updateSet: Record<string, unknown> = {};
 
-  try {
-    const values: InsertUser = {
-      openId: user.openId,
-    };
-    const updateSet: Record<string, unknown> = {};
+      const textFields = ["name", "email", "loginMethod"] as const;
+      type TextField = (typeof textFields)[number];
 
-    const textFields = ["name", "email", "loginMethod"] as const;
-    type TextField = (typeof textFields)[number];
+      const assignNullable = (field: TextField) => {
+        const value = user[field];
+        if (value === undefined) return;
+        const normalized = value ?? null;
+        values[field] = normalized;
+        updateSet[field] = normalized;
+      };
 
-    const assignNullable = (field: TextField) => {
-      const value = user[field];
-      if (value === undefined) return;
-      const normalized = value ?? null;
-      values[field] = normalized;
-      updateSet[field] = normalized;
-    };
+      textFields.forEach(assignNullable);
 
-    textFields.forEach(assignNullable);
+      if (user.lastSignedIn !== undefined) {
+        values.lastSignedIn = user.lastSignedIn;
+        updateSet.lastSignedIn = user.lastSignedIn;
+      }
+      if (user.role !== undefined) {
+        values.role = user.role;
+        updateSet.role = user.role;
+      } else if (user.openId === ENV.ownerOpenId) {
+        values.role = "admin";
+        updateSet.role = "admin";
+      }
 
-    if (user.lastSignedIn !== undefined) {
-      values.lastSignedIn = user.lastSignedIn;
-      updateSet.lastSignedIn = user.lastSignedIn;
-    }
-    if (user.role !== undefined) {
-      values.role = user.role;
-      updateSet.role = user.role;
-    } else if (user.openId === ENV.ownerOpenId) {
-      values.role = 'admin';
-      updateSet.role = 'admin';
-    }
+      if (!values.lastSignedIn) {
+        values.lastSignedIn = new Date();
+      }
 
-    if (!values.lastSignedIn) {
-      values.lastSignedIn = new Date();
-    }
+      if (Object.keys(updateSet).length === 0) {
+        updateSet.lastSignedIn = new Date();
+      }
 
-    if (Object.keys(updateSet).length === 0) {
-      updateSet.lastSignedIn = new Date();
-    }
-
-    await db.insert(users).values(values).onDuplicateKeyUpdate({
-      set: updateSet,
-    });
-  } catch (error) {
-    console.error("[Database] Failed to upsert user:", error);
-    throw error;
-  }
+      await db
+        .insert(users)
+        .values(values)
+        .onDuplicateKeyUpdate({
+          set: updateSet,
+        });
+    },
+    async () => localDb.upsertUser(user)
+  );
 }
 
 export async function getUserByOpenId(openId: string) {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get user: database not available");
-    return undefined;
-  }
-
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-
-  return result.length > 0 ? result[0] : undefined;
+  return runWithLocalFallback(
+    "getUserByOpenId",
+    async (db) => {
+      const result = await db
+        .select()
+        .from(users)
+        .where(eq(users.openId, openId))
+        .limit(1);
+      return result.length > 0 ? result[0] : undefined;
+    },
+    async () => localDb.getUserByOpenId(openId)
+  );
 }
 
 export async function getUserByEmail(email: string) {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get user by email: database not available");
-    return undefined;
-  }
-
-  const result = await db
-    .select()
-    .from(users)
-    .where(eq(users.email, email))
-    .limit(1);
-  return result.length > 0 ? result[0] : undefined;
+  return runWithLocalFallback(
+    "getUserByEmail",
+    async (db) => {
+      const result = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, email))
+        .limit(1);
+      return result.length > 0 ? result[0] : undefined;
+    },
+    async () => localDb.getUserByEmail(email)
+  );
 }
 
 export async function getLocalCredentialByUserId(userId: number) {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get local credential: database not available");
-    return undefined;
-  }
-
-  const result = await db
-    .select()
-    .from(localCredentials)
-    .where(eq(localCredentials.userId, userId))
-    .limit(1);
-  return result.length > 0 ? result[0] : undefined;
+  return runWithLocalFallback(
+    "getLocalCredentialByUserId",
+    async (db) => {
+      const result = await db
+        .select()
+        .from(localCredentials)
+        .where(eq(localCredentials.userId, userId))
+        .limit(1);
+      return result.length > 0 ? result[0] : undefined;
+    },
+    async () => localDb.getLocalCredentialByUserId(userId)
+  );
 }
 
 export async function upsertLocalCredential(
   userId: number,
   passwordHash: string
 ): Promise<void> {
-  const db = await getDb();
-  if (!db) {
-    throw new Error("Database not available");
-  }
-
-  await db
-    .insert(localCredentials)
-    .values({
-      userId,
-      passwordHash,
-    })
-    .onDuplicateKeyUpdate({
-      set: {
-        passwordHash,
-      },
-    });
+  await runWithLocalFallback(
+    "upsertLocalCredential",
+    async (db) => {
+      await db
+        .insert(localCredentials)
+        .values({
+          userId,
+          passwordHash,
+        })
+        .onDuplicateKeyUpdate({
+          set: {
+            passwordHash,
+          },
+        });
+    },
+    async () => localDb.upsertLocalCredential(userId, passwordHash)
+  );
 }
 
 // TODO: add feature queries here as your schema grows.
