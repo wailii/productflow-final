@@ -17,7 +17,6 @@ import { invokeLLM, type LLMRuntimeConfig, type MessageContent } from "./_core/l
 
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 const providerIdSchema = z.enum(AI_PROVIDER_IDS);
-const DEFAULT_PROVIDER_ID: AiProviderId = "kimi";
 
 function normalizeProviderBaseUrl(value: string) {
   return value
@@ -54,13 +53,13 @@ type UserAiConfigPublic = {
 
 function toUserAiConfigPublic(setting: Awaited<ReturnType<typeof dbHelpers.getUserAiSettingByUserId>>): UserAiConfigPublic {
   if (!setting) {
-    const preset = AI_PROVIDER_PRESET_MAP[DEFAULT_PROVIDER_ID];
+    const preset = AI_PROVIDER_PRESET_MAP.custom;
     return {
-      providerId: preset.id,
+      providerId: "custom",
       providerLabel: preset.label,
       enabled: false,
-      baseUrl: preset.defaultBaseUrl,
-      model: preset.defaultModel,
+      baseUrl: "",
+      model: "",
       hasApiKey: false,
       docsUrl: preset.docsUrl,
       updatedAt: null,
@@ -84,20 +83,30 @@ function toUserAiConfigPublic(setting: Awaited<ReturnType<typeof dbHelpers.getUs
   };
 }
 
-async function resolveUserLlmRuntimeConfig(userId: number): Promise<LLMRuntimeConfig | undefined> {
+async function resolveUserLlmRuntimeConfigOrThrow(userId: number): Promise<LLMRuntimeConfig> {
   const setting = await dbHelpers.getUserAiSettingByUserId(userId);
-  if (!setting || setting.enabled !== 1) return undefined;
+  if (!setting) {
+    throw new Error("请先在「个人 AI 设置」中配置并启用模型。");
+  }
+  if (setting.enabled !== 1) {
+    throw new Error("个人 AI 配置未启用，请到「个人 AI 设置」开启后再试。");
+  }
 
   const apiKey = decryptSecret(setting.apiKeyEncrypted);
-  if (!apiKey) return undefined;
+  if (!apiKey) {
+    throw new Error("个人 AI 配置缺少 API Key，请到「个人 AI 设置」补全。");
+  }
 
   const baseUrl = normalizeProviderBaseUrl(setting.baseUrl);
-  if (!baseUrl || !setting.model) return undefined;
+  const model = setting.model?.trim();
+  if (!baseUrl || !model) {
+    throw new Error("个人 AI 配置不完整，请填写 Base URL 和模型名称。");
+  }
 
   return {
     apiUrl: baseUrl,
     apiKey,
-    model: setting.model.trim(),
+    model,
   };
 }
 
@@ -129,6 +138,63 @@ function inferAssetType(mimeType: string): "document" | "image" | "prototype" | 
     return "document";
   }
   return "other";
+}
+
+function formatExportTimestampForFileName(date: Date) {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const min = String(date.getMinutes()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}-${hh}${min}`;
+}
+
+function normalizeStepOutputText(output: Record<string, any> | null | undefined) {
+  const raw = output?.text;
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    return raw.trim();
+  }
+  if (output && Object.keys(output).length > 0) {
+    return `\`\`\`json\n${JSON.stringify(output, null, 2)}\n\`\`\``;
+  }
+  return "（暂无输出）";
+}
+
+function buildPrdMarkdown(params: {
+  project: Awaited<ReturnType<typeof dbHelpers.getProjectById>>;
+  steps: Awaited<ReturnType<typeof dbHelpers.getWorkflowStepsByProjectId>>;
+  exportedAt: Date;
+}) {
+  const { project, steps, exportedAt } = params;
+  if (!project) {
+    throw new Error("Project not found");
+  }
+
+  const lines: string[] = [];
+  lines.push(`# ${project.title} - PRD`);
+  lines.push("");
+  lines.push(`- 导出时间：${exportedAt.toISOString()}`);
+  lines.push(`- 项目 ID：${project.id}`);
+  lines.push(`- 当前进度：Step ${Math.min(project.currentStep + 1, 9)}/9`);
+  lines.push("");
+  lines.push("## 原始需求");
+  lines.push("");
+  lines.push(project.rawRequirement?.trim() || "（未填写）");
+  lines.push("");
+  lines.push("## 工作流输出");
+  lines.push("");
+
+  for (let stepNumber = 0; stepNumber < 9; stepNumber += 1) {
+    const step = steps.find((item) => item.stepNumber === stepNumber) ?? null;
+    lines.push(`### Step ${stepNumber + 1}: ${getStepName(stepNumber)}`);
+    lines.push("");
+    lines.push(`- 状态：${step?.status ?? "pending"}`);
+    lines.push("");
+    lines.push(normalizeStepOutputText(step?.output ?? null));
+    lines.push("");
+  }
+
+  return lines.join("\n").trimEnd() + "\n";
 }
 
 export const appRouter = router({
@@ -384,7 +450,7 @@ export const appRouter = router({
         z.object({
           projectId: z.number(),
           stepNumber: z.number().min(0).max(8).optional(),
-          limit: z.number().min(1).max(200).optional(),
+          limit: z.number().min(1).max(5000).optional(),
         })
       )
       .query(async ({ ctx, input }) => {
@@ -409,7 +475,7 @@ export const appRouter = router({
         z.object({
           projectId: z.number(),
           stepNumber: z.number().min(0).max(8).optional(),
-          limit: z.number().min(1).max(300).optional(),
+          limit: z.number().min(1).max(5000).optional(),
         })
       )
       .query(async ({ ctx, input }) => {
@@ -429,6 +495,78 @@ export const appRouter = router({
         } as const;
       }),
 
+    // 导出 PRD（Markdown 文件）
+    exportPrd: protectedProcedure
+      .input(
+        z.object({
+          projectId: z.number(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const project = await dbHelpers.getProjectById(input.projectId, ctx.user.id);
+        if (!project) {
+          throw new Error("Project not found");
+        }
+
+        const steps = await dbHelpers.getWorkflowStepsByProjectId(input.projectId);
+        const exportedAt = new Date();
+        const markdown = buildPrdMarkdown({
+          project,
+          steps,
+          exportedAt,
+        });
+
+        const fileTimestamp = formatExportTimestampForFileName(exportedAt);
+        const exportedFileName = `${sanitizeFileName(project.title)}-PRD-${fileTimestamp}.md`;
+        const storageKey = `productflow/${project.id}/exports/${fileTimestamp}-${Math.random()
+          .toString(36)
+          .slice(2, 10)}-${exportedFileName}`;
+
+        const stored = await storagePut(
+          storageKey,
+          markdown,
+          "text/markdown; charset=utf-8"
+        );
+
+        const asset = await dbHelpers.appendWorkflowAsset({
+          projectId: input.projectId,
+          assetType: "document",
+          scope: "project",
+          fileName: exportedFileName,
+          mimeType: "text/markdown",
+          fileSize: Buffer.byteLength(markdown, "utf8"),
+          storageKey: stored.key,
+          sourceLabel: "prd_export",
+          note: "自动导出的 PRD 文档",
+        });
+
+        await dbHelpers.appendWorkflowArtifact({
+          projectId: input.projectId,
+          artifactType: "conversation_note",
+          source: "system",
+          visibility: "both",
+          title: `导出 PRD · ${exportedFileName}`,
+          content: [
+            `assetId=${asset.id}`,
+            `storageKey=${asset.storageKey}`,
+            `fileName=${exportedFileName}`,
+          ].join("\n"),
+          payload: {
+            assetId: asset.id,
+            storageKey: asset.storageKey,
+            fileName: exportedFileName,
+          },
+        });
+
+        return {
+          fileName: exportedFileName,
+          mimeType: "text/markdown",
+          content: markdown,
+          url: stored.url,
+          assetId: asset.id,
+        } as const;
+      }),
+
     // 分析变更请求：判断应从哪一步重跑、影响哪些步骤
     analyzeChangeRequest: protectedProcedure
       .input(
@@ -438,7 +576,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        const runtimeConfig = await resolveUserLlmRuntimeConfig(ctx.user.id);
+        const runtimeConfig = await resolveUserLlmRuntimeConfigOrThrow(ctx.user.id);
         const project = await dbHelpers.getProjectById(input.projectId, ctx.user.id);
         if (!project) {
           throw new Error("Project not found");
@@ -589,6 +727,24 @@ export const appRouter = router({
         );
       }),
 
+    // 获取项目全流程对话时间线（跨步骤连续）
+    getConversationTimeline: protectedProcedure
+      .input(
+        z.object({
+          projectId: z.number(),
+        })
+      )
+      .query(async ({ ctx, input }) => {
+        const project = await dbHelpers.getProjectById(
+          input.projectId,
+          ctx.user.id
+        );
+        if (!project) {
+          throw new Error("Project not found");
+        }
+        return dbHelpers.getProjectConversationHistory(input.projectId);
+      }),
+
     // 在步骤内继续对话（多轮打磨）
     continueConversation: protectedProcedure
       .input(
@@ -599,7 +755,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        const runtimeConfig = await resolveUserLlmRuntimeConfig(ctx.user.id);
+        const runtimeConfig = await resolveUserLlmRuntimeConfigOrThrow(ctx.user.id);
         // 验证项目所有权
         const project = await dbHelpers.getProjectById(
           input.projectId,
@@ -764,8 +920,12 @@ export const appRouter = router({
     // 获取项目的所有步骤
     getSteps: protectedProcedure
       .input(z.object({ projectId: z.number() }))
-      .query(async ({ input }) => {
-        return dbHelpers.getWorkflowStepsByProjectId(input.projectId);
+      .query(async ({ ctx, input }) => {
+        const project = await dbHelpers.getProjectById(input.projectId, ctx.user.id);
+        if (!project) {
+          throw new Error("Project not found");
+        }
+        return dbHelpers.ensureWorkflowStepsByProjectId(input.projectId);
       }),
 
     // 执行指定步骤
@@ -777,7 +937,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        const runtimeConfig = await resolveUserLlmRuntimeConfig(ctx.user.id);
+        const runtimeConfig = await resolveUserLlmRuntimeConfigOrThrow(ctx.user.id);
         // 获取项目
         const project = await dbHelpers.getProjectById(
           input.projectId,
@@ -877,6 +1037,23 @@ export const appRouter = router({
           throw new Error("Project not found");
         }
 
+        // 确保当前步骤存在并标记完成（即使用户只是口令推进）
+        let currentStepRecord = await dbHelpers.getWorkflowStep(
+          input.projectId,
+          input.stepNumber
+        );
+        if (!currentStepRecord) {
+          currentStepRecord = await dbHelpers.createWorkflowStep(
+            input.projectId,
+            input.stepNumber
+          );
+        }
+        if (currentStepRecord.status !== "completed") {
+          await dbHelpers.updateWorkflowStep(currentStepRecord.id, {
+            status: "completed",
+          });
+        }
+
         // 更新项目当前步骤
         const nextStep = input.stepNumber + 1;
         const newStatus = nextStep >= 9 ? "completed" : "in_progress";
@@ -885,6 +1062,33 @@ export const appRouter = router({
           nextStep,
           newStatus
         );
+
+        // 进入下一步时注入一条轻量上下文消息，避免新步骤空白
+        if (nextStep < 9) {
+          const existingNextStep = await dbHelpers.getWorkflowStep(
+            input.projectId,
+            nextStep
+          );
+          if (!existingNextStep) {
+            await dbHelpers.createWorkflowStep(
+              input.projectId,
+              nextStep
+            );
+          }
+
+          const nextStepConversation = await dbHelpers.getConversationHistory(
+            input.projectId,
+            nextStep
+          );
+          if (nextStepConversation.length === 0) {
+            await dbHelpers.addConversationMessage(
+              input.projectId,
+              nextStep,
+              "system",
+              `已进入 Step ${nextStep + 1}（${getStepName(nextStep)}）。你可以继续提出修改意见，或输入“进入下一步”。`
+            );
+          }
+        }
 
         return { success: true, nextStep };
       }),

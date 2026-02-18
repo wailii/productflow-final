@@ -2682,6 +2682,11 @@
   color: var(--text-primary);
 }
 
+.pf-workspace-page .topbar-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .pf-workspace-page .topbar-progress {
   align-items: center;
   color: var(--text-tertiary);
@@ -2754,8 +2759,8 @@
 
 .pf-workspace-page .conversation-inner {
   margin: 0 auto;
-  max-width: 720px;
-  padding: 32px 24px 64px;
+  max-width: 860px;
+  padding: 30px 28px 56px;
 }
 
 .pf-workspace-page .workflow-guidance {
@@ -2847,6 +2852,53 @@
   animation: pulseWorkspace 2s ease-in-out infinite;
 }
 
+.pf-workspace-page .conversation-meta-strip {
+  align-items: center;
+  color: var(--text-tertiary);
+  display: flex;
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  gap: 12px;
+  margin: 0 0 16px;
+}
+
+.pf-workspace-page .timeline-step-marker {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  margin: 14px 0 12px 30px;
+}
+
+.pf-workspace-page .timeline-step-chip {
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.05em;
+  line-height: 1;
+  padding: 5px 10px;
+}
+
+.pf-workspace-page .timeline-step-name {
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+}
+
+.pf-workspace-page .timeline-system-event {
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  margin: 0 0 18px 30px;
+  padding: 8px 10px;
+  width: fit-content;
+}
+
 .pf-workspace-page .message {
   animation: msgInWorkspace var(--dur-normal) var(--ease-out) both;
   margin-bottom: 24px;
@@ -2887,6 +2939,18 @@
   font-weight: 600;
 }
 
+.pf-workspace-page .message-step-tag {
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 4px 7px;
+}
+
 .pf-workspace-page .message-time {
   color: var(--text-muted);
   font-family: var(--font-mono);
@@ -2906,6 +2970,12 @@
 
 .pf-workspace-page .message-body p:last-child {
   margin-bottom: 0;
+}
+
+.pf-workspace-page .message-body.user-message p {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .pf-workspace-page .questionnaire-card {
@@ -2930,6 +3000,31 @@
   margin: 6px 0 0;
 }
 
+.pf-workspace-page .questionnaire-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.pf-workspace-page .questionnaire-progress {
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  padding: 5px 9px;
+}
+
+.pf-workspace-page .questionnaire-draft-tip {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+}
+
 .pf-workspace-page .questionnaire-fields {
   display: flex;
   flex-direction: column;
@@ -2937,10 +3032,52 @@
   margin-top: 14px;
 }
 
+.pf-workspace-page .questionnaire-empty {
+  color: var(--text-tertiary);
+  font-size: 0.76rem;
+  padding: 6px 2px;
+}
+
 .pf-workspace-page .questionnaire-field {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.pf-workspace-page .questionnaire-field-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.pf-workspace-page .questionnaire-field-actions {
+  align-items: center;
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.pf-workspace-page .questionnaire-state {
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 4px 8px;
+  text-transform: uppercase;
+}
+
+.pf-workspace-page .questionnaire-state.answered {
+  background: var(--success-light);
+  border-color: rgba(45, 122, 79, 0.32);
+  color: var(--success);
+}
+
+.pf-workspace-page .questionnaire-state.pending {
+  background: var(--surface-secondary);
 }
 
 .pf-workspace-page .questionnaire-label {
@@ -2953,6 +3090,52 @@
   color: var(--text-tertiary);
   font-size: 0.74rem;
   line-height: 1.55;
+}
+
+.pf-workspace-page .questionnaire-option-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pf-workspace-page .questionnaire-option-meta {
+  align-items: center;
+  color: var(--text-tertiary);
+  display: flex;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  justify-content: space-between;
+  letter-spacing: 0.03em;
+}
+
+.pf-workspace-page .questionnaire-option-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.pf-workspace-page .questionnaire-action-link {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.pf-workspace-page .questionnaire-action-link:hover {
+  color: var(--text-primary);
+}
+
+.pf-workspace-page .questionnaire-action-link:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  text-decoration: none;
 }
 
 .pf-workspace-page .questionnaire-options {
@@ -2986,6 +3169,30 @@
 .pf-workspace-page .questionnaire-option input {
   accent-color: var(--accent);
   margin-top: 2px;
+}
+
+.pf-workspace-page .questionnaire-select-wrap {
+  display: flex;
+}
+
+.pf-workspace-page .questionnaire-select {
+  appearance: none;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  min-height: 38px;
+  outline: none;
+  padding: 8px 12px;
+  width: 100%;
+}
+
+.pf-workspace-page .questionnaire-select:focus {
+  background: var(--surface-primary);
+  border-color: var(--border-focus);
 }
 
 .pf-workspace-page .questionnaire-input {
@@ -3094,6 +3301,27 @@
   color: var(--text-tertiary);
   font-size: 0.8rem;
   font-style: italic;
+}
+
+.pf-workspace-page .asset-inline-note-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 10px 0 18px 30px;
+}
+
+.pf-workspace-page .asset-inline-note {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.pf-workspace-page .asset-inline-meta {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  margin-left: 8px;
 }
 
 .pf-workspace-page .asset-card-inline {
@@ -3208,12 +3436,60 @@
 
 .pf-workspace-page .input-area {
   background: linear-gradient(to top, var(--surface-ground) 60%, transparent);
-  padding: 16px 24px 24px;
+  padding: 12px 28px 18px;
+}
+
+.pf-workspace-page .command-hint {
+  align-items: center;
+  color: var(--text-tertiary);
+  display: flex;
+  font-size: 0.74rem;
+  gap: 6px;
+  margin: 0 auto 8px;
+  max-width: 860px;
+}
+
+.pf-workspace-page .command-hint code {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.pf-workspace-page .command-notice {
+  align-items: center;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  display: flex;
+  font-size: 0.76rem;
+  gap: 6px;
+  margin: 0 auto 8px;
+  max-width: 860px;
+  padding: 8px 10px;
+}
+
+.pf-workspace-page .command-notice.info {
+  background: var(--surface-secondary);
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+
+.pf-workspace-page .command-notice.warning {
+  background: var(--warning-light);
+  border-color: rgba(184, 134, 11, 0.3);
+  color: var(--warning);
+}
+
+.pf-workspace-page .command-notice.success {
+  background: var(--success-light);
+  border-color: rgba(45, 122, 79, 0.28);
+  color: var(--success);
 }
 
 .pf-workspace-page .input-container {
   margin: 0 auto;
-  max-width: 720px;
+  max-width: 860px;
   position: relative;
 }
 
@@ -3223,13 +3499,13 @@
   border-radius: var(--radius-lg);
   color: var(--text-primary);
   font-family: var(--font-body);
-  font-size: 0.93rem;
+  font-size: 0.92rem;
   line-height: 1.5;
-  max-height: 340px;
-  min-height: 136px;
+  max-height: 280px;
+  min-height: 96px;
   outline: none;
   overflow-y: auto;
-  padding: 14px 54px 44px 16px;
+  padding: 12px 52px 36px 14px;
   resize: none;
   width: 100%;
 }
@@ -3245,11 +3521,11 @@
 
 .pf-workspace-page .input-actions {
   align-items: center;
-  bottom: 12px;
+  bottom: 8px;
   display: flex;
-  gap: 8px;
+  gap: 6px;
   position: absolute;
-  right: 12px;
+  right: 8px;
 }
 
 .pf-workspace-page .input-btn {
@@ -3283,8 +3559,8 @@
 
 .pf-workspace-page .input-hint {
   color: var(--text-muted);
-  font-size: 0.7rem;
-  margin-top: 8px;
+  font-size: 0.69rem;
+  margin-top: 6px;
   text-align: center;
 }
 
@@ -3295,7 +3571,7 @@
   flex-direction: column;
   overflow: hidden;
   transition: width var(--dur-normal) var(--ease-out), opacity var(--dur-normal) var(--ease-out);
-  width: 340px;
+  width: 360px;
 }
 
 .pf-workspace-page .asset-panel.collapsed {
@@ -3343,40 +3619,61 @@
 .pf-workspace-page .asset-panel-content {
   flex: 1;
   overflow-y: auto;
-  padding: 16px 20px;
+  padding: 14px 16px;
 }
 
 .pf-workspace-page .asset-group {
-  margin-bottom: 24px;
+  margin-bottom: 20px;
+}
+
+.pf-workspace-page .asset-group-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
 }
 
 .pf-workspace-page .asset-group-label {
+  align-items: center;
   color: var(--text-muted);
+  display: inline-flex;
   font-family: var(--font-mono);
-  font-size: 0.65rem;
+  font-size: 0.67rem;
+  gap: 6px;
   letter-spacing: 0.06em;
-  margin-bottom: 12px;
   text-transform: uppercase;
+}
+
+.pf-workspace-page .asset-group-count {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
 }
 
 .pf-workspace-page .asset-item {
   align-items: center;
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
   cursor: pointer;
   display: flex;
   gap: 12px;
-  margin-bottom: 4px;
-  padding: 12px 16px;
-  transition: background var(--dur-fast) var(--ease-out);
+  margin-bottom: 6px;
+  padding: 10px 12px;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
 
 .pf-workspace-page .asset-item:hover {
   background: var(--surface-secondary);
+  border-color: var(--border-default);
 }
 
 .pf-workspace-page .asset-item.active {
-  background: var(--surface-secondary);
-  border: 1px solid var(--border-default);
+  background: var(--surface-primary);
+  border-color: var(--border-emphasis);
+}
+
+.pf-workspace-page .asset-item.archived {
+  opacity: 0.7;
 }
 
 .pf-workspace-page .asset-item-icon {
@@ -3388,6 +3685,16 @@
   height: 28px;
   justify-content: center;
   width: 28px;
+}
+
+.pf-workspace-page .asset-item-icon-doc {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.pf-workspace-page .asset-item-icon-upload {
+  background: var(--surface-secondary);
+  color: var(--text-tertiary);
 }
 
 .pf-workspace-page .asset-item-info {
@@ -3417,7 +3724,55 @@
   color: var(--success);
   font-family: var(--font-mono);
   font-size: 0.6rem;
-  padding: 1px 6px;
+  padding: 2px 6px;
+}
+
+.pf-workspace-page .asset-item-action {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  width: 24px;
+}
+
+.pf-workspace-page .asset-item:hover .asset-item-action,
+.pf-workspace-page .asset-item.active .asset-item-action {
+  opacity: 1;
+}
+
+.pf-workspace-page .asset-item-action:hover {
+  color: var(--text-primary);
+}
+
+.pf-workspace-page .asset-history-empty {
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  padding: 6px 2px;
+}
+
+.pf-workspace-page .asset-load-more {
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: block;
+  font-size: 0.75rem;
+  margin-top: 10px;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.pf-workspace-page .asset-load-more:hover {
+  border-color: var(--border-emphasis);
+  color: var(--text-primary);
 }
 
 .pf-workspace-page .asset-preview {
@@ -3449,10 +3804,37 @@
   margin: 12px 0;
   max-width: 100%;
   overflow-x: auto;
+  white-space: pre;
 }
 
 .pf-workspace-page .message-body.prose :where(code) {
   font-size: 0.8em;
+}
+
+.pf-workspace-page .message-body.prose {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.pf-workspace-page .message-body.prose :where(h1, h2, h3, h4, h5, h6) {
+  color: var(--text-primary);
+  line-height: 1.35;
+  margin-top: 1.05em;
+}
+
+.pf-workspace-page .message-body.prose :where(ul, ol) {
+  margin: 0.6em 0 0.9em 1.2em;
+}
+
+.pf-workspace-page .message-body.prose :where(li) {
+  margin: 0.2em 0;
+}
+
+.pf-workspace-page .message-body.prose :where(blockquote) {
+  border-left: 2px solid var(--border-emphasis);
+  color: var(--text-secondary);
+  margin: 0.8em 0;
+  padding-left: 0.75em;
 }
 
 .pf-workspace-page .message-body.prose :where(table) {
@@ -3650,6 +4032,15 @@
   opacity: 0.85;
 }
 
+.pf-inline-link.pf-inline-link-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: inline;
+  margin: 0 0 0 4px;
+  padding: 0;
+}
+
 @keyframes thinkBounceWorkspace {
   0%,
   60%,
@@ -3703,7 +4094,7 @@
 
   .pf-workspace-page .asset-panel.collapsed {
     transform: translateX(100%);
-    width: 340px;
+    width: 360px;
   }
 
   .pf-workspace-page .topbar {
@@ -3712,6 +4103,25 @@
 
   .pf-workspace-page .topbar-project {
     display: none;
+  }
+
+  .pf-workspace-page .topbar-step-pill {
+    display: none;
+  }
+
+  .pf-workspace-page .command-hint {
+    flex-wrap: wrap;
+    padding: 0 2px;
+  }
+
+  .pf-workspace-page .conversation-meta-strip {
+    gap: 8px;
+    line-height: 1.45;
+  }
+
+  .pf-workspace-page .timeline-step-marker,
+  .pf-workspace-page .timeline-system-event {
+    margin-left: 0;
   }
 }
 

@@ -66,7 +66,7 @@ export default function Settings() {
     },
   });
 
-  const [selectedProviderId, setSelectedProviderId] = useState<AiProviderId>("kimi");
+  const [selectedProviderId, setSelectedProviderId] = useState<AiProviderId>("custom");
   const [enabled, setEnabled] = useState(false);
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");

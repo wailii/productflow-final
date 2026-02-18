@@ -27,12 +27,6 @@ requireInProduction("DATABASE_URL", process.env.DATABASE_URL, missingInProductio
 requireInProduction("JWT_SECRET", process.env.JWT_SECRET, missingInProduction);
 if (
   isProduction &&
-  !(process.env.LLM_API_KEY || process.env.BUILT_IN_FORGE_API_KEY)
-) {
-  missingInProduction.push("LLM_API_KEY (or BUILT_IN_FORGE_API_KEY)");
-}
-if (
-  isProduction &&
   !(
     process.env.VITE_APP_ID &&
     process.env.OAUTH_SERVER_URL &&
@@ -62,9 +56,6 @@ export const ENV = {
   isProduction,
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
-  llmApiUrl: process.env.LLM_API_URL ?? process.env.BUILT_IN_FORGE_API_URL ?? "",
-  llmApiKey: process.env.LLM_API_KEY ?? process.env.BUILT_IN_FORGE_API_KEY ?? "",
-  llmModel: process.env.LLM_MODEL ?? "kimi-k2.5",
   agentMaxIterations: parseIntInRange(process.env.AGENT_MAX_ITERATIONS, 3, 1, 5),
   agentPassScore: parseIntInRange(process.env.AGENT_PASS_SCORE, 85, 60, 100),
   enableLocalAuth: process.env.ENABLE_LOCAL_AUTH !== "false",

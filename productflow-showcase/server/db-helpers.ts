@@ -20,6 +20,19 @@ import {
 } from "../drizzle/schema";
 import { storageGet } from "./storage";
 
+function isMissingTableError(error: unknown, tableName: string): boolean {
+  const message = String(
+    (error as { message?: string })?.message ??
+      (error as { cause?: { message?: string } })?.cause?.message ??
+      ""
+  ).toLowerCase();
+  return (
+    message.includes(`table`) &&
+    message.includes("doesn't exist") &&
+    message.includes(tableName.toLowerCase())
+  ) || message.includes(`from \`${tableName.toLowerCase()}\``);
+}
+
 /**
  * 项目相关的数据库操作
  */
@@ -138,13 +151,23 @@ export async function getUserAiSettingByUserId(userId: number): Promise<UserAiSe
   const db = await getDb();
   if (!db) return null;
 
-  const [setting] = await db
-    .select()
-    .from(userAiSettings)
-    .where(eq(userAiSettings.userId, userId))
-    .limit(1);
+  try {
+    const [setting] = await db
+      .select()
+      .from(userAiSettings)
+      .where(eq(userAiSettings.userId, userId))
+      .limit(1);
 
-  return setting ?? null;
+    return setting ?? null;
+  } catch (error) {
+    if (isMissingTableError(error, "user_ai_settings")) {
+      console.warn(
+        "[db] user_ai_settings table not found, fallback to built-in LLM config"
+      );
+      return null;
+    }
+    throw error;
+  }
 }
 
 export async function upsertUserAiSetting(data: {
@@ -258,6 +281,42 @@ export async function initializeWorkflowSteps(projectId: number): Promise<void> 
   );
 }
 
+export async function ensureWorkflowStepsByProjectId(projectId: number): Promise<WorkflowStep[]> {
+  const existing = await getWorkflowStepsByProjectId(projectId);
+  if (existing.length >= 9) {
+    return existing;
+  }
+
+  const db = await getDb();
+  if (!db) return existing;
+
+  const existingStepNumbers = new Set(existing.map((item) => item.stepNumber));
+  const missingSteps = Array.from({ length: 9 }, (_, stepNumber) => stepNumber).filter(
+    (stepNumber) => !existingStepNumbers.has(stepNumber)
+  );
+
+  if (missingSteps.length === 0) {
+    return existing;
+  }
+
+  try {
+    await db.insert(workflowSteps).values(
+      missingSteps.map((stepNumber) => ({
+        projectId,
+        stepNumber,
+        status: "pending" as const,
+      }))
+    );
+  } catch (error) {
+    const message = String((error as { message?: string })?.message ?? "").toLowerCase();
+    if (!message.includes("duplicate")) {
+      throw error;
+    }
+  }
+
+  return getWorkflowStepsByProjectId(projectId);
+}
+
 /**
  * Conversation History 相关的数据库操作
  */
@@ -291,6 +350,17 @@ export async function getConversationHistory(projectId: number, stepNumber: numb
   return db.select().from(conversationHistory).where(
     and(eq(conversationHistory.projectId, projectId), eq(conversationHistory.stepNumber, stepNumber))
   ).orderBy(conversationHistory.createdAt);
+}
+
+export async function getProjectConversationHistory(projectId: number): Promise<ConversationMessage[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  return db
+    .select()
+    .from(conversationHistory)
+    .where(eq(conversationHistory.projectId, projectId))
+    .orderBy(conversationHistory.createdAt, conversationHistory.id);
 }
 
 export async function clearConversationHistory(projectId: number, stepNumber: number): Promise<void> {

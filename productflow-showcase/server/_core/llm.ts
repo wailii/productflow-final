@@ -1,5 +1,3 @@
-import { ENV } from "./env";
-
 export type Role = "system" | "user" | "assistant" | "tool" | "function";
 
 export type TextContent = {
@@ -219,9 +217,9 @@ const normalizeToolChoice = (
 };
 
 const resolveApiUrl = (runtimeApiUrl?: string) => {
-  const raw = runtimeApiUrl ?? ENV.llmApiUrl;
+  const raw = runtimeApiUrl?.trim();
   if (!raw || raw.trim().length === 0) {
-    return "https://api.moonshot.cn/v1/chat/completions";
+    throw new Error("LLM API URL is not configured");
   }
 
   const normalized = raw.replace(/\/$/, "");
@@ -233,9 +231,9 @@ const resolveApiUrl = (runtimeApiUrl?: string) => {
 };
 
 const assertApiKey = (runtimeApiKey?: string) => {
-  const key = runtimeApiKey ?? ENV.llmApiKey;
+  const key = runtimeApiKey?.trim();
   if (!key) {
-    throw new Error("LLM_API_KEY is not configured");
+    throw new Error("LLM API key is not configured");
   }
 };
 
@@ -300,9 +298,12 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     runtime_config,
   } = params;
   const runtime = runtimeConfig || runtime_config;
-  const resolvedApiKey = runtime?.apiKey ?? ENV.llmApiKey;
-  const resolvedModel = runtime?.model ?? ENV.llmModel;
+  const resolvedApiKey = runtime?.apiKey;
+  const resolvedModel = runtime?.model?.trim();
   assertApiKey(resolvedApiKey);
+  if (!resolvedModel) {
+    throw new Error("LLM model is not configured");
+  }
 
   const payload: Record<string, unknown> = {
     model: resolvedModel,

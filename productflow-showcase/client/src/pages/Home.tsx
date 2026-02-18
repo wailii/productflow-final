@@ -114,6 +114,7 @@ export default function Home() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
+  const [showAuthSlowHint, setShowAuthSlowHint] = useState(false);
 
   const [title, setTitle] = useState("");
 
@@ -126,11 +127,14 @@ export default function Home() {
     });
 
   const createProject = trpc.projects.create.useMutation({
-    onSuccess: () => {
+    onSuccess: (createdProject) => {
       toast.success("项目创建成功");
       setIsCreateDialogOpen(false);
       setTitle("");
       void refetch();
+      if (createdProject?.id) {
+        setLocation(`/project/${createdProject.id}`);
+      }
     },
     onError: (error) => {
       toast.error(`创建失败: ${error.message}`);
@@ -439,10 +443,46 @@ export default function Home() {
     return { className: "draft", text: "草稿" };
   };
 
+  useEffect(() => {
+    if (!authLoading) {
+      setShowAuthSlowHint(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setShowAuthSlowHint(true);
+    }, 2200);
+    return () => window.clearTimeout(timer);
+  }, [authLoading]);
+
   if (authLoading) {
     return (
-      <div className="pf-page flex min-h-screen items-center justify-center">
-        <Loader2 className="h-8 w-8 animate-spin text-[var(--pf-text-secondary)]" />
+      <div className="pf-page flex min-h-screen items-center justify-center px-4">
+        <div className="pf-side-card max-w-md text-center">
+          <Loader2 className="mx-auto h-8 w-8 animate-spin text-[var(--pf-text-secondary)]" />
+          <h3 className="mt-3">正在加载首页</h3>
+          <p className="mt-2">
+            正在验证登录状态并加载项目列表。
+            {showAuthSlowHint ? " 如果长时间停留，请点击重试。" : ""}
+          </p>
+          <div className="mt-4 flex items-center justify-center gap-2">
+            <button
+              type="button"
+              className="pf-btn-secondary"
+              onClick={() => {
+                void refresh();
+              }}
+            >
+              重试
+            </button>
+            <button
+              type="button"
+              className="pf-btn-primary"
+              onClick={() => window.location.reload()}
+            >
+              刷新页面
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
