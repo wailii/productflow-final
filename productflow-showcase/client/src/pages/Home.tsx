@@ -217,54 +217,6 @@ export default function Home() {
   useEffect(() => {
     if (isAuthenticated) return;
 
-    const nodes = Array.from(document.querySelectorAll<HTMLElement>(".reveal"));
-    if (nodes.length === 0) return;
-
-    const markAllVisible = () => {
-      for (const node of nodes) {
-        node.classList.add("visible");
-      }
-    };
-
-    if (typeof window === "undefined" || !("IntersectionObserver" in window)) {
-      markAllVisible();
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            entry.target.classList.add("visible");
-          }
-        }
-      },
-      { threshold: 0.15 }
-    );
-
-    for (const node of nodes) {
-      if (node.getBoundingClientRect().top < window.innerHeight * 0.95) {
-        node.classList.add("visible");
-      }
-    }
-
-    for (const node of nodes) {
-      observer.observe(node);
-    }
-
-    const fallbackTimer = window.setTimeout(() => {
-      markAllVisible();
-    }, 1200);
-
-    return () => {
-      window.clearTimeout(fallbackTimer);
-      observer.disconnect();
-    };
-  }, [isAuthenticated]);
-
-  useEffect(() => {
-    if (isAuthenticated) return;
-
     const glow = cursorGlowRef.current;
     if (!glow) return;
 
@@ -637,24 +589,24 @@ export default function Home() {
 
         <section className="why-section" id="why">
           <div className="why-inner">
-            <div className="reveal">
+            <div className="reveal visible">
               <div className="section-label">Why ProductFlow</div>
               <h2 className="section-title">不是更聪明的回答，<br />而是更稳定的产出</h2>
               <p className="section-desc">重点不是展示模型有多聪明，而是让团队在真实项目里稳定产出。</p>
             </div>
 
             <div className="why-grid">
-              <div className="why-card tilt-card reveal">
+              <div className="why-card tilt-card reveal visible">
                 <div className="why-card-num">01</div>
                 <div className="why-card-title">从混乱输入到清晰目标</div>
                 <div className="why-card-desc">先澄清再设计，避免"带着误解开工"。每一步都有输入、有输出、有可追溯上下文。</div>
               </div>
-              <div className="why-card tilt-card reveal">
+              <div className="why-card tilt-card reveal visible">
                 <div className="why-card-num">02</div>
                 <div className="why-card-title">流程化协作而非一次性回答</div>
                 <div className="why-card-desc">9步标准化链路，从需求澄清到PRD交付。中间产出可追溯、可复盘、可修改。</div>
               </div>
-              <div className="why-card tilt-card reveal">
+              <div className="why-card tilt-card reveal visible">
                 <div className="why-card-num">03</div>
                 <div className="why-card-title">交付导向的 AI 工作台</div>
                 <div className="why-card-desc">最终产出可以直接进入研发排期与执行。不是聊天记录，而是结构化的PRD文档。</div>
@@ -665,7 +617,7 @@ export default function Home() {
 
         <section className="flow-section" id="flow">
           <div className="flow-inner">
-            <div className="reveal">
+            <div className="reveal visible">
               <div className="section-label">Workflow Architecture</div>
               <h2 className="section-title">9 步流程，3 个阶段</h2>
               <p className="section-desc">先澄清需求，再形成方案，最后沉淀交付。顺着往下看就能理解全链路。</p>
@@ -673,7 +625,7 @@ export default function Home() {
 
             <div className="flow-phases">
               {FLOW_PHASES.map((phase) => (
-                <div key={phase.id} className="flow-phase reveal">
+                <div key={phase.id} className="flow-phase reveal visible">
                   <div className="flow-phase-label">
                     <div className="flow-phase-num">{phase.id}</div>
                     <div className="flow-phase-name">{phase.name}</div>
@@ -696,7 +648,7 @@ export default function Home() {
         </section>
 
         <section className="cta-section">
-          <div className="cta-inner reveal">
+          <div className="cta-inner reveal visible">
             <div className="section-label">Start Now</div>
             <h2 className="section-title">把下一次需求评审，<br />变成可执行计划</h2>
             <p className="section-desc">登录后立刻创建项目，系统将自动初始化 9 步流程。</p>
