@@ -1,22 +1,4 @@
 services:
-  - type: pserv
-    name: productflow-mysql
-    runtime: image
-    image:
-      url: docker.io/library/mysql:8.0
-    plan: free
-    envVars:
-      - key: PORT
-        value: "3306"
-      - key: MYSQL_DATABASE
-        value: productflow
-      - key: MYSQL_USER
-        value: productflow
-      - key: MYSQL_PASSWORD
-        value: pf_mysql_change_me
-      - key: MYSQL_ROOT_PASSWORD
-        value: pf_root_change_me
-
   - type: web
     name: productflow-showcase
     runtime: node
@@ -34,28 +16,8 @@ services:
         value: "3"
       - key: AGENT_PASS_SCORE
         value: "85"
-      - key: DB_HOST
-        fromService:
-          type: pserv
-          name: productflow-mysql
-          property: host
-      - key: DB_PORT
-        value: "3306"
-      - key: DB_USER
-        fromService:
-          type: pserv
-          name: productflow-mysql
-          envVarKey: MYSQL_USER
-      - key: DB_PASSWORD
-        fromService:
-          type: pserv
-          name: productflow-mysql
-          envVarKey: MYSQL_PASSWORD
-      - key: DB_NAME
-        fromService:
-          type: pserv
-          name: productflow-mysql
-          envVarKey: MYSQL_DATABASE
+      - key: DATABASE_URL
+        value: mysql://user:pass@host:3306/dbname
       - key: JWT_SECRET
         generateValue: true
       - key: VITE_APP_ID
