@@ -7,7 +7,12 @@ import { ENV } from "./_core/env";
 
 type StorageConfig = { baseUrl: string; apiKey: string };
 
-const LOCAL_UPLOAD_ROOT = path.resolve(process.cwd(), ".webdev", "uploads");
+const configuredLocalStorageRoot = process.env.LOCAL_STORAGE_ROOT?.trim();
+const LOCAL_STORAGE_ROOT =
+  configuredLocalStorageRoot && configuredLocalStorageRoot.length > 0
+    ? path.resolve(configuredLocalStorageRoot)
+    : path.resolve(process.cwd(), ".webdev");
+const LOCAL_UPLOAD_ROOT = path.resolve(LOCAL_STORAGE_ROOT, "uploads");
 
 export function getLocalStorageDirectory() {
   return LOCAL_UPLOAD_ROOT;
