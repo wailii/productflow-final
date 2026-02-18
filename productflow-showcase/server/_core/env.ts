@@ -45,11 +45,16 @@ const buildDatabaseUrlFromParts = (): string => {
 };
 
 const resolveDatabaseUrl = (): string => {
+  const fromParts = buildDatabaseUrlFromParts();
+  if (fromParts) {
+    return fromParts;
+  }
+
   const raw = process.env.DATABASE_URL?.trim() ?? "";
   if (raw && !PLACEHOLDER_DATABASE_URLS.has(raw.toLowerCase())) {
     return raw;
   }
-  return buildDatabaseUrlFromParts();
+  return "";
 };
 
 const resolvedDatabaseUrl = resolveDatabaseUrl();
