@@ -1,0 +1,56 @@
+name: productflow-demo
+
+services:
+  app:
+    build:
+      context: ./productflow-showcase
+      dockerfile: Dockerfile
+    image: ${PRODUCTFLOW_IMAGE:-productflow-showcase:macmini}
+    container_name: productflow-app
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${APP_ENV_FILE:-./productflow-showcase/.env.macmini}
+    environment:
+      LOCAL_STORAGE_ROOT: /data
+      PORT: 3000
+    ports:
+      - "${PRODUCTFLOW_BIND:-127.0.0.1}:${PRODUCTFLOW_PORT:-3000}:3000"
+    volumes:
+      - type: bind
+        source: ${PRODUCTFLOW_DATA_DIR:?set PRODUCTFLOW_DATA_DIR in .env.macmini}
+        target: /data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1));",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=64m
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: productflow-cloudflared
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CF_TUNNEL_TOKEN}
+    profiles:
+      - public
