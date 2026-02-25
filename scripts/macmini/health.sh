@@ -16,9 +16,18 @@ PORT="$(read_env_value PRODUCTFLOW_PORT "${ROOT_ENV_FILE}")"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-3000}"
 
-if curl -fsS --max-time 10 "http://${HOST}:${PORT}/" >/dev/null; then
+ok=0
+for i in $(seq 1 30); do
+  if curl -fsS --max-time 10 "http://${HOST}:${PORT}/" >/dev/null; then
+    ok=1
+    break
+  fi
+  sleep 2
+done
+
+if [[ "${ok}" -eq 1 ]]; then
   echo "HTTP health check OK: http://${HOST}:${PORT}/"
 else
-  echo "HTTP health check failed: http://${HOST}:${PORT}/"
+  echo "HTTP health check failed after retries: http://${HOST}:${PORT}/"
   exit 1
 fi

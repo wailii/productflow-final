@@ -8,29 +8,29 @@
 - 默认不直接暴露公网端口，公网访问走 Cloudflare Tunnel（可选）。
 
 ## 仓库内已准备的文件
-- `/Users/wali/Downloads/productflow-final/docker-compose.macmini.yml`
-- `/Users/wali/Downloads/productflow-final/.env.macmini.example`
-- `/Users/wali/Downloads/productflow-final/productflow-showcase/.env.macmini.example`
-- `/Users/wali/Downloads/productflow-final/scripts/macmini/`
+- `/Users/<your-mac-user>/Downloads/productflow-final/docker-compose.macmini.yml`
+- `/Users/<your-mac-user>/Downloads/productflow-final/.env.macmini.example`
+- `/Users/<your-mac-user>/Downloads/productflow-final/productflow-showcase/.env.macmini.example`
+- `/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/`
 
 ## 一次性初始化
 在仓库根目录执行：
 
 ```bash
-chmod +x /Users/wali/Downloads/productflow-final/scripts/macmini/*.sh
-/Users/wali/Downloads/productflow-final/scripts/macmini/prepare.sh
+chmod +x /Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/*.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/prepare.sh
 ```
 
 首次运行会自动生成：
-- `/Users/wali/Downloads/productflow-final/.env.macmini`
-- `/Users/wali/Downloads/productflow-final/productflow-showcase/.env.macmini`
+- `/Users/<your-mac-user>/Downloads/productflow-final/.env.macmini`
+- `/Users/<your-mac-user>/Downloads/productflow-final/productflow-showcase/.env.macmini`
 
 然后编辑这两个文件。
 
 ## 必改配置
 
 ### 1) 根目录 `.env.macmini`
-- `PRODUCTFLOW_DATA_DIR`：改成你的实际路径（例如 `/Users/wali/server-data/productflow`）
+- `PRODUCTFLOW_DATA_DIR`：改成你的实际路径（例如 `/Users/<your-mac-user>/server-data/productflow`）
 - `CF_TUNNEL_TOKEN`：如果要公网访问，填 Cloudflare Tunnel token；不需要公网可留空
 
 ### 2) 应用目录 `productflow-showcase/.env.macmini`
@@ -47,28 +47,33 @@ openssl rand -base64 48
 
 ### 本地/LAN 部署（不带公网隧道）
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/deploy.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/deploy.sh
 ```
 
 ### 启用公网（Cloudflare Tunnel）
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/deploy.sh --public
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/deploy.sh --public
 ```
+
+### 构建器说明
+- 部署脚本使用 Docker 默认构建配置即可。
+- 不需要额外设置 `DOCKER_BUILDKIT=0` 或 `COMPOSE_DOCKER_CLI_BUILD=0`。
+- 镜像构建已固定 `pnpm` 版本并带重试，降低首次构建时的网络抖动影响。
 
 ### 常用运维命令
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/status.sh
-/Users/wali/Downloads/productflow-final/scripts/macmini/health.sh
-/Users/wali/Downloads/productflow-final/scripts/macmini/logs.sh app
-/Users/wali/Downloads/productflow-final/scripts/macmini/down.sh
-/Users/wali/Downloads/productflow-final/scripts/macmini/update.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/status.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/health.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/logs.sh app
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/down.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/update.sh
 ```
 
 ## 备份与恢复
 
 ### 手动备份
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/backup.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/backup.sh
 ```
 
 默认输出目录：
@@ -76,25 +81,25 @@ openssl rand -base64 48
 
 ### 恢复
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/restore.sh /path/to/productflow-data-YYYYMMDD-HHMMSS.tgz
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/restore.sh /path/to/productflow-data-YYYYMMDD-HHMMSS.tgz
 ```
 
 ## 开机自启（在 Mac mini 上执行）
 
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/install-launchd.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/install-launchd.sh
 ```
 
 如果你需要开机后自动带公网隧道：
 
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/install-launchd.sh --public
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/install-launchd.sh --public
 ```
 
 卸载：
 
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/uninstall-launchd.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/uninstall-launchd.sh
 ```
 
 ## 电源策略（在 Mac mini 上执行）
@@ -102,13 +107,13 @@ openssl rand -base64 48
 开启“服务模式”（防止睡眠中断）：
 
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/power-keepawake.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/power-keepawake.sh
 ```
 
 恢复系统默认：
 
 ```bash
-/Users/wali/Downloads/productflow-final/scripts/macmini/power-defaults.sh
+/Users/<your-mac-user>/Downloads/productflow-final/scripts/macmini/power-defaults.sh
 ```
 
 ## 安全与限制
